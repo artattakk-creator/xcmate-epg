@@ -175,6 +175,7 @@ class ArtworkEnricher:
         self.tvmaze = tvmaze
         self.authorize_tvmaze = self.config.get('authorize_tvmaze', False) is True
         self.tvmaze_bulk_metadata = self.config.get('tvmaze_bulk_metadata') is True
+        self.tvmaze_gallery = self.config.get('tvmaze_gallery') is True
         self.tmdb_credits = self.config.get('tmdb_credits') is True
         self.counts = {key: 0 for key in (
             'programmes_considered', 'programmes_eligible', 'programmes_matched',
@@ -640,6 +641,55 @@ class ArtworkEnricher:
             raise _Unavailable('metadata unavailable')
         return data
 
+    def _tvmaze_gallery_image(self, identifier):
+        """Select one provider-declared background for an already verified show.
+
+        Dimensions only rank bounded landscape candidates; the concrete URL
+        still needs the normal image proof before it can appear in XMLTV.
+        """
+        key = json.dumps(['live-tvmaze-gallery-v1', identifier])
+        found, rows = self._cached_metadata(key)
+        if not found:
+            try:
+                rows = self._tvmaze_json(f'https://api.tvmaze.com/shows/{identifier}/images', list)
+                if len(rows) > 1000:
+                    raise _Unavailable('metadata unavailable')
+            except _Unavailable:
+                return None
+            self.state.cache(key, rows, _METADATA_TTL if rows else 86400)
+        if not isinstance(rows, list) or len(rows) > 1000:
+            return None
+        identifiers = Counter(row['id'] for row in rows if isinstance(row, dict)
+                              and type(row.get('id')) is int and row['id'] > 0)
+        candidates = []
+        for row in rows:
+            if (not isinstance(row, dict) or type(row.get('id')) is not int or row['id'] <= 0
+                    or identifiers[row['id']] != 1 or row.get('type') != 'background'):
+                continue
+            resolutions = row.get('resolutions')
+            original = resolutions.get('original') if isinstance(resolutions, dict) else None
+            if not self._tvmaze_gallery_resolution(original):
+                continue
+            medium = resolutions.get('medium')
+            candidates.append({'id': row['id'], 'main': row.get('main') is True,
+                'original': original,
+                'medium': medium if self._tvmaze_gallery_resolution(medium) else None})
+        return min(candidates, key=lambda image: (not image['main'],
+            -image['original']['width'] * image['original']['height'], image['id'])) if candidates else None
+
+    def _tvmaze_gallery_resolution(self, resolution):
+        if not isinstance(resolution, dict):
+            return False
+        width, height = resolution.get('width'), resolution.get('height')
+        if (type(width) is not int or type(height) is not int
+                or not 0 < height < width <= 16384 or width * height > 16 * 1024 * 1024):
+            return False
+        try:
+            public_image(resolution.get('url'), self.hosts)
+        except (ValueError, TypeError, AttributeError):
+            return False
+        return True
+
     @staticmethod
     def _credit_text(value, limit):
         if not isinstance(value, str):
@@ -807,6 +857,9 @@ class ArtworkEnricher:
                                   {'source': 'original programme icon', 'identity_verified': False})
             feed.append(record)
         tree.append(clean)
+        # Only explicit alternatives belonging to the same provider record may
+        # be tried. Keep failed originals as private evidence in records.
+        resolution_fallbacks = {}
         # Calling aggregate also exercises existing movie/episode positive/negative caches.
         result, _ = pipeline.aggregate([('bounded-event', tree)], _Cache(self, year if episode else None), metadata)
         enriched = result.find('programme')
@@ -908,15 +961,34 @@ class ArtworkEnricher:
                 if enriched.find('star-rating') is None and type(rating) in (int, float) and 0 < rating <= 10:
                     node = ET.SubElement(enriched, 'star-rating', {'system': 'TVMaze'})
                     ET.SubElement(node, 'value').text = str(rating) + '/10'
+                evidence = {'title': 'unicode_normalized_exact', 'year': year or None,
+                            'episode': list(episode) if episode else None, 'episode_id': ep.get('id') if ep else None,
+                            'episode_airdate': ep.get('airdate') if ep else None,
+                            'episode_year_validation': ('exact' if year else 'not_supplied') if ep else None}
                 for kind, media in (('poster', detail), ('episode_still', ep)):
                     image = media.get('image') if media else None
                     url = image.get('original') if isinstance(image, dict) else None
                     if isinstance(url, str):
-                        records.append(self._record(enriched, kind, url, 'tvmaze', identifier,
-                            {'title': 'unicode_normalized_exact', 'year': year or None,
-                             'episode': list(episode) if episode else None, 'episode_id': ep.get('id') if ep else None,
-                             'episode_airdate': ep.get('airdate') if ep else None,
-                             'episode_year_validation': ('exact' if year else 'not_supplied') if ep else None}))
+                        record = self._record(enriched, kind, url, 'tvmaze', identifier, dict(evidence))
+                        if self.tvmaze_gallery:
+                            record['scope'] = 'series' if kind == 'poster' else 'episode'
+                            record['evidence']['resolution'] = 'original'
+                            medium = image.get('medium')
+                            if isinstance(medium, str) and medium != url:
+                                resolution_fallbacks[id(record)] = {'url': medium}
+                        records.append(record)
+                if self.tvmaze_gallery:
+                    image = self._tvmaze_gallery_image(identifier)
+                    if image:
+                        gallery_evidence = dict(evidence, gallery_image_id=image['id'], resolution='original',
+                            gallery_endpoint=f'https://api.tvmaze.com/shows/{identifier}/images',
+                            provider_dimensions={key: image['original'][key] for key in ('width', 'height')})
+                        record = self._record(enriched, 'backdrop', image['original']['url'],
+                                              'tvmaze', identifier, gallery_evidence)
+                        record['scope'] = 'series'
+                        records.append(record)
+                        if image['medium'] and image['medium']['url'] != record['url']:
+                            resolution_fallbacks[id(record)] = image['medium']
         if provider:
             self.last_metadata = {'provider': provider, 'provider_id': identifier, 'scope': scope}
             if ((provider == 'tvmaze' and self.tvmaze_bulk_metadata)
@@ -930,12 +1002,27 @@ class ArtworkEnricher:
         for icon in enriched.findall('icon'):
             enriched.remove(icon)
         records.extend(feed)
+        fallback_records = []
         for record in records:
             if record['provider'] == 'feed' and not self.config.get('allow_feed_images', False):
                 continue
             record.update(self.verify_media(record['url']))
             if record['verified']:
                 ET.SubElement(enriched, 'icon', {'src': record['url']})
+            elif id(record) in resolution_fallbacks:
+                resolution = resolution_fallbacks[id(record)]
+                evidence = dict(record['evidence'], resolution='medium', fallback_from=record['url'])
+                if 'provider_dimensions' in evidence:
+                    evidence['provider_dimensions'] = {key: resolution[key] for key in ('width', 'height')}
+                medium = self._record(enriched, record['type'], resolution['url'],
+                    record['provider'], record['provider_id'],
+                    evidence)
+                medium['scope'] = record['scope']
+                medium.update(self.verify_media(medium['url']))
+                if medium['verified']:
+                    fallback_records.append(medium)
+                    ET.SubElement(enriched, 'icon', {'src': medium['url']})
+        records.extend(fallback_records)
         if provider:
             self.counts['programmes_matched'] += 1
             if identity not in self.matched_identities:
