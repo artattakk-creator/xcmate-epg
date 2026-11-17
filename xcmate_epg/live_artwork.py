@@ -400,7 +400,7 @@ class ArtworkEnricher:
                 and not any(n.get('lang') == language for n in programme.findall('title')[1:])):
             ET.SubElement(programme, 'title', {'lang': language}).text = original
         rating = detail.get('vote_average')
-        if programme.find('star-rating') is None and type(rating) in (int, float) and 0 < rating <= 10:
+        if not episode and programme.find('star-rating') is None and type(rating) in (int, float) and 0 < rating <= 10:
             node = ET.SubElement(programme, 'star-rating', {'system': 'TMDB'})
             ET.SubElement(node, 'value').text = str(rating) + '/10'
         for genre in detail.get('genres', []) if isinstance(detail.get('genres'), list) else []:

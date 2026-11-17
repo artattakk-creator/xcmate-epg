@@ -196,6 +196,26 @@ class TMDBIntegrationTests(unittest.TestCase):
         self.assertTrue(next(r for r in records if r['type']=='episode_still')['verified'])
         self.assertGreater(adapter.summary()['api_budget_exhausted'],0)
 
+    def test_episode_rating_never_falls_back_to_series_rating(self):
+        cases = ((None, False, []), (0, False, []), (7.5, False, ['7.5/10']),
+                 (None, True, ['5/5']), (0, True, ['5/5']), (7.5, True, ['5/5']))
+        for episode_rating, source_rating, expected in cases:
+            with self.subTest(episode_rating=episode_rating, source_rating=source_rating):
+                self.state.db.execute('DELETE FROM artwork')
+                self.fixture=TMDBFixture()
+                if episode_rating is None:
+                    self.fixture.ep.pop('vote_average')
+                else:
+                    self.fixture.ep['vote_average']=episode_rating
+                channel,programme=event(episode=True,category='series')
+                if source_rating:
+                    ET.SubElement(programme,'star-rating',system='source').append(
+                        ET.fromstring('<value>5/5</value>'))
+                result,records=self.adapter().enrich(channel,programme)
+                self.assertEqual(result.findtext('episode-num[@system="tmdb"]'),'tv/42/1/2')
+                self.assertTrue(next(r for r in records if r.get('scope')=='series')['verified'])
+                self.assertEqual([n.text for n in result.findall('star-rating/value')],expected)
+
     def test_episode_identity_requires_real_positive_id_and_integer_numbers(self):
         for key,value in (('id',None),('id',False),('id',0),('season_number',True),('episode_number','2')):
             with self.subTest(key=key,value=value):
