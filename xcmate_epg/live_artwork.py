@@ -11,7 +11,7 @@ import html
 import json
 import re
 import time
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 from xml.etree import ElementTree as ET
 
 from . import artwork, pipeline
@@ -491,14 +491,37 @@ class ArtworkEnricher:
         except ValueError:
             return False
 
+    @staticmethod
+    def _tvmaze_search_valid(hits):
+        return (isinstance(hits, list) and all(
+            isinstance(hit, dict) and type(hit.get('id')) is int and hit['id'] > 0
+            and isinstance(hit.get('name'), str) and bool(artwork.title_key(hit['name']))
+            for hit in hits))
+
     def _tvmaze_search(self, title, normalized):
         key = json.dumps(['live-tvmaze-search-v1', normalized])
         found, hits = self._cached_metadata(key)
-        if not found:
-            hits = self._client(self.tvmaze, 'search_series', title, None)
-            if not isinstance(hits, list) or not all(isinstance(hit, dict) for hit in hits):
-                raise _Unavailable('metadata unavailable')
-            self.state.cache(key, hits, _METADATA_TTL if hits else 86400)
+        if not found or not self._tvmaze_search_valid(hits):
+            try:
+                if isinstance(self.tvmaze, artwork.TVMaze):
+                    rows = self._tvmaze_json('https://api.tvmaze.com/search/shows?' +
+                                             urlencode({'q': title}), list)
+                    # Preserve independently valid rows from a partial response.
+                    # The legacy client rejects the whole list on a bad wrapper.
+                    fresh = [dict(row['show'], first_air_date=row['show'].get('premiered') or '')
+                             if isinstance(row, dict) and isinstance(row.get('show'), dict)
+                             else None for row in rows]
+                else:
+                    fresh = self._client(self.tvmaze, 'search_series', title, None)
+                if not isinstance(fresh, list):
+                    raise _Unavailable('metadata unavailable')
+            except _Unavailable:
+                if not found or not isinstance(hits, list):
+                    raise
+            else:
+                hits = fresh
+                if self._tvmaze_search_valid(hits):
+                    self.state.cache(key, hits, _METADATA_TTL if hits else 86400)
         return hits
 
     def _tvmaze_show_detail(self, hit, title, year):
@@ -518,8 +541,14 @@ class ArtworkEnricher:
         normalized = artwork.title_key(title)
         key = json.dumps(['live-tvmaze-show-v2', normalized, year])
         found, value = self._cached_metadata(key)
-        if found and (value is None or self._tvmaze_show_matches(value, normalized, year)):
-            return value
+        if found:
+            if value is not None and self._tvmaze_show_matches(value, normalized, year):
+                return value
+            if value is None:
+                raw_found, raw = self.state.cached(json.dumps(['live-tvmaze-search-v1', normalized]))
+                # Old malformed search rows may have produced a title negative.
+                if not raw_found or self._tvmaze_search_valid(raw):
+                    return None
         try:
             hits = self._tvmaze_search(title, normalized)
             candidates = {hit['id']: hit for hit in hits
@@ -529,15 +558,15 @@ class ArtworkEnricher:
                 self.counts['ambiguous'] += 1
             if len(candidates) == 1:
                 value = self._tvmaze_show_detail(next(iter(candidates.values())), normalized, year)
-            self.state.cache(key, value, _METADATA_TTL if value else 86400)
+            if value is not None or self._tvmaze_search_valid(hits):
+                self.state.cache(key, value, _METADATA_TTL if value else 86400)
             return value
         except (ValueError, TimeoutError, OSError, TypeError, AttributeError):
             return None
 
-    @staticmethod
-    def _tvmaze_episode_identity(episode, season, number):
+    def _tvmaze_episode_identity(self, episode, season, number):
         return (isinstance(episode, dict) and type(episode.get('id')) is int and episode['id'] > 0
-                and episode.get('type', 'regular') == 'regular'
+                and episode.get('type', None if self.tvmaze_bulk_metadata else 'regular') == 'regular'
                 and type(episode.get('season')) is int and episode['season'] == season
                 and type(episode.get('number')) is int and episode['number'] == number)
 
@@ -641,6 +670,16 @@ class ArtworkEnricher:
             raise _Unavailable('metadata unavailable')
         return data
 
+    @staticmethod
+    def _tvmaze_gallery_row_valid(row):
+        return (isinstance(row, dict) and type(row.get('id')) is int and row['id'] > 0
+                and 'type' in row and (row['type'] is None or isinstance(row['type'], str))
+                and isinstance(row.get('resolutions'), dict))
+
+    def _tvmaze_gallery_rows_valid(self, rows):
+        return (isinstance(rows, list) and len(rows) <= 1000
+                and all(self._tvmaze_gallery_row_valid(row) for row in rows))
+
     def _tvmaze_gallery_image(self, identifier):
         """Select one provider-declared background for an already verified show.
 
@@ -649,21 +688,25 @@ class ArtworkEnricher:
         """
         key = json.dumps(['live-tvmaze-gallery-v1', identifier])
         found, rows = self._cached_metadata(key)
-        if not found:
+        if not found or not self._tvmaze_gallery_rows_valid(rows):
             try:
-                rows = self._tvmaze_json(f'https://api.tvmaze.com/shows/{identifier}/images', list)
-                if len(rows) > 1000:
+                fresh = self._tvmaze_json(f'https://api.tvmaze.com/shows/{identifier}/images', list)
+                if len(fresh) > 1000:
                     raise _Unavailable('metadata unavailable')
             except _Unavailable:
-                return None
-            self.state.cache(key, rows, _METADATA_TTL if rows else 86400)
+                if not found:
+                    return None
+            else:
+                rows = fresh
+                if self._tvmaze_gallery_rows_valid(rows):
+                    self.state.cache(key, rows, _METADATA_TTL if rows else 86400)
         if not isinstance(rows, list) or len(rows) > 1000:
             return None
         identifiers = Counter(row['id'] for row in rows if isinstance(row, dict)
                               and type(row.get('id')) is int and row['id'] > 0)
         candidates = []
         for row in rows:
-            if (not isinstance(row, dict) or type(row.get('id')) is not int or row['id'] <= 0
+            if (not self._tvmaze_gallery_row_valid(row)
                     or identifiers[row['id']] != 1 or row.get('type') != 'background'):
                 continue
             resolutions = row.get('resolutions')
@@ -833,7 +876,10 @@ class ArtworkEnricher:
             # A malformed/conflicting source identity must not reach the old
             # strict parser or accidentally qualify the event as a movie.
             ET.SubElement(clean, 'episode-num', {'system': 'xmltv_ns'})
-        metadata = _Metadata(self, self.tmdb, year) if self.tmdb is not None else None
+        # Removing untrusted source IDs above must not undo the scope decision.
+        # Passing no metadata also gates aggregate's positive and negative caches.
+        metadata = (_Metadata(self, self.tmdb, year)
+                    if self.tmdb is not None and ((movie and year) or episode) else None)
         source_dates = None
         if episode and self.tmdb is not None:
             hit = self._tmdb_show(title)
