@@ -1003,15 +1003,19 @@ class ArtworkEnricher:
             enriched.remove(icon)
         records.extend(feed)
         fallback_records = []
+        emitted_urls = set()
         for record in records:
             if record['provider'] == 'feed' and not self.config.get('allow_feed_images', False):
                 continue
             record.update(self.verify_media(record['url']))
             if record['verified']:
-                ET.SubElement(enriched, 'icon', {'src': record['url']})
+                if not self.tvmaze_gallery or record['url'] not in emitted_urls:
+                    ET.SubElement(enriched, 'icon', {'src': record['url']})
+                    emitted_urls.add(record['url'])
             elif id(record) in resolution_fallbacks:
                 resolution = resolution_fallbacks[id(record)]
-                evidence = dict(record['evidence'], resolution='medium', fallback_from=record['url'])
+                evidence = dict(record['evidence'], resolution='medium',
+                    fallback_from_sha256=hashlib.sha256(record['url'].encode('utf-8')).hexdigest())
                 if 'provider_dimensions' in evidence:
                     evidence['provider_dimensions'] = {key: resolution[key] for key in ('width', 'height')}
                 medium = self._record(enriched, record['type'], resolution['url'],
@@ -1021,7 +1025,9 @@ class ArtworkEnricher:
                 medium.update(self.verify_media(medium['url']))
                 if medium['verified']:
                     fallback_records.append(medium)
-                    ET.SubElement(enriched, 'icon', {'src': medium['url']})
+                    if medium['url'] not in emitted_urls:
+                        ET.SubElement(enriched, 'icon', {'src': medium['url']})
+                        emitted_urls.add(medium['url'])
         records.extend(fallback_records)
         if provider:
             self.counts['programmes_matched'] += 1

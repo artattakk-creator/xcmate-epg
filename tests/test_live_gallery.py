@@ -1,5 +1,7 @@
 """Synthetic gallery and explicit provider-resolution fallback contracts."""
+import hashlib
 import json
+from pathlib import Path
 import tempfile
 import time
 import unittest
@@ -99,6 +101,25 @@ class GalleryTests(unittest.TestCase):
         self.assertEqual([r['type'] for r in records], ['poster', 'episode_still', 'backdrop'])
         self.assertFalse(any('medium' in u for u in self.requests))
 
+    def test_original_shared_across_roles_keeps_typed_records_with_one_xml_icon(self):
+        self.show['image'] = {'original': CDN + 'background-31.png'}
+        result, records = self.enrich()
+        self.assertEqual([r['type'] for r in records], ['poster', 'backdrop'])
+        self.assertTrue(all(r['verified'] for r in records))
+        self.assertEqual([node.get('src') for node in result.findall('icon')],
+                         [CDN + 'background-31.png'])
+
+    def test_medium_shared_across_roles_keeps_typed_records_with_one_xml_icon(self):
+        self.show['image'] = {'original': CDN + 'bad-poster.png', 'medium': CDN + 'background-31-medium.png'}
+        for filename in ('bad-poster.png', 'background-31.png'):
+            self.responses[CDN + filename] = Response(404, b'', {})
+        result, records = self.enrich()
+        verified = [record for record in records if record['verified']]
+        self.assertEqual([r['type'] for r in verified], ['poster', 'backdrop'])
+        self.assertEqual(len(records), 4)
+        self.assertEqual([node.get('src') for node in result.findall('icon')],
+                         [CDN + 'background-31-medium.png'])
+
     def test_bad_original_retained_and_explicit_medium_verified_for_every_type(self):
         self.show['image'] = {'original': CDN + 'poster.png', 'medium': CDN + 'poster-medium.png'}
         self.episode['image'] = {'original': CDN + 'episode.png', 'medium': CDN + 'episode-medium.png'}
@@ -113,7 +134,10 @@ class GalleryTests(unittest.TestCase):
             self.assertEqual(record['verified'], 'medium' in record['url'])
             if record['verified']:
                 self.assertEqual(record['evidence']['resolution'], 'medium')
-                self.assertNotIn('medium', record['evidence']['fallback_from'])
+                original = record['url'].replace('-medium.png', '.png')
+                self.assertEqual(record['evidence']['fallback_from_sha256'],
+                                 hashlib.sha256(original.encode('utf-8')).hexdigest())
+                self.assertNotIn('fallback_from', record['evidence'])
                 if record['type'] == 'backdrop':
                     self.assertEqual(record['evidence']['provider_dimensions'], {'width': 640, 'height': 360})
         self.assertEqual(adapter.summary()['image_attempts'], 6)
@@ -176,6 +200,54 @@ class GalleryTests(unittest.TestCase):
         self.assertEqual(len(records), 3)
         self.assertFalse(any(r['evidence']['resolution'] == 'medium' for r in records))
         self.assertFalse(any('auth=' in url for url in self.requests))
+
+    def test_unsafe_originals_keep_only_hash_provenance_in_valid_medium_evidence(self):
+        self.routes['/shows/7/images'] = []
+        originals = ('https://synthetic-user:synthetic-pass@static.tvmaze.com/poster.png',
+                     'https://static.tvmaze.com/episode.png?token=synthetic-credential')
+        self.show['image'] = {'original': originals[0], 'medium': CDN + 'poster-medium.png'}
+        self.episode['image'] = {'original': originals[1], 'medium': CDN + 'episode-medium.png'}
+        result, records = self.enrich(episode=True)
+        self.assertEqual(len(result.findall('icon')), 2)
+        self.assertEqual([r['url'] for r in records if not r['verified']], list(originals))
+        for record, original in zip((r for r in records if r['verified']), originals):
+            self.assertEqual(record['evidence']['fallback_from_sha256'],
+                             hashlib.sha256(original.encode('utf-8')).hexdigest())
+            self.assertNotIn('fallback_from', record['evidence'])
+        self.assertFalse(any(original in json.dumps(r['evidence'])
+                             for original in originals for r in records))
+        self.assertFalse(any(original in self.requests for original in originals))
+
+    def test_full_renderer_sanitizes_failed_original_and_preserves_medium_hash(self):
+        from xcmate_epg.full_preview import run_full
+
+        original = 'https://synthetic-user:synthetic-pass@static.tvmaze.com/poster.png?token=synthetic-credential'
+        self.show['image'] = {'original': original, 'medium': CDN + 'poster-medium.png'}
+        self.routes['/shows/7/images'] = []
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / 'source.xml'
+            tree = ET.Element('tv')
+            tree.extend(event(category='series'))
+            source.write_bytes(ET.tostring(tree))
+            config = {'sources': [{'id': 'synthetic', 'path': str(source)}],
+                      'horizon': {'reference_time': '2020-01-01T00:00:00+00:00',
+                                  'past_days': 1, 'future_days': 1}}
+            report = run_full(config, root / 'output', metadata=self.adapter())
+            self.assertEqual(report['full']['programmes'], 1)
+            payload = (root / 'output' / 'artwork-metadata.jsonl').read_text()
+            self.assertNotIn(original, payload)
+            self.assertNotIn('synthetic-pass', payload)
+            self.assertNotIn('synthetic-credential', payload)
+            records = [json.loads(line) for line in payload.splitlines()]
+            self.assertEqual(len(records), 2)
+            self.assertNotIn('url', records[0])
+            self.assertEqual(records[0]['error'], 'UNSAFE_ARTWORK_REFERENCE')
+            self.assertTrue(records[1]['verified'])
+            self.assertEqual(records[1]['url'], CDN + 'poster-medium.png')
+            self.assertEqual(records[1]['evidence']['fallback_from_sha256'],
+                             hashlib.sha256(original.encode('utf-8')).hexdigest())
+            self.assertNotIn(original, self.requests)
 
     def test_transient_poster_and_episode_original_recover_without_metadata_refetch(self):
         self.show['image'] = {'original': CDN + 'poster.png', 'medium': CDN + 'poster-medium.png'}
