@@ -1,0 +1,23 @@
+# NOT under .github/workflows; deliberately not executable.
+# Before activation: rights, protected persistent state, TMDB attribution,
+# source/mapping review, cache size/retention and explicit release approval.
+name: XCMate EPG Agent - future trusted production
+on:
+  workflow_dispatch:
+  # schedule:
+  #   - cron: '17 3 * * *'
+permissions:
+  contents: read
+concurrency:
+  group: xcmate-production
+  cancel-in-progress: false
+jobs:
+  aggregate:
+    if: false # explicit release gate; no real source command provided
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - run: echo 'Activation requires reviewed implementation and release approval'
+# Later: restore protected last-good state, validate, persist atomically,
+# then separately approve Pages deployment. No Pages/deploy permissions here.
+# TMDB_READ_ACCESS_TOKEN may only be injected into a trusted protected job.

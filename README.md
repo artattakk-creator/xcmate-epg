@@ -36,3 +36,18 @@ Die GitHub-Budgets bleiben auf 0 USD. Kein Budget erhöhen und keine kostenpflic
 - Keine täglichen Jobs oder Veröffentlichungen ohne separate Freigabe; Fehler dürfen niemals den letzten gültigen EPG überschreiben.
 
 Die Architektur wird schrittweise implementiert, unabhängig vom derzeitigen Pilot-XCMate `0.1.29.97`.
+
+## Entwicklungsbranch: inkrementeller Agent
+
+Der eigenständige Python-Backend-Kern, synthetische CLI und Offline-Tests sind implementiert.
+Aufruf und Grenzen: [Entwicklungsstand](docs/DEVELOPMENT_DE.md).
+Der Standardlauf nutzt keine echten Daten, kein Secret und kein Netzwerk:
+
+```sh
+python3 -m unittest discover -s tests -v
+python3 -m xcmate_epg --state work/private/state.sqlite --output work/demo
+```
+
+**Weiterhin gesperrt:** produktive Quellen, Veröffentlichung, Tagesplan und Kodi-Änderungen.
+Der Auftrag bestätigt ein vorhandenes Repository-Secret; dessen Existenz wurde nicht geprüft.
+Die frühere Einrichtungsnotiz zur Secret-Anlage ist deshalb historischer Bootstrap-Stand.
