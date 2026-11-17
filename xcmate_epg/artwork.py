@@ -103,6 +103,14 @@ class TMDB:
             raise ValueError('invalid season identifiers')
         return self._get(f'tv/{identifier}/season/{season}')
 
+    def movie_credits(self,identifier):
+        if type(identifier) is not int or identifier<=0: raise ValueError('invalid movie ID')
+        return self._get(f'movie/{identifier}/credits')
+
+    def series_credits(self,identifier):
+        if type(identifier) is not int or identifier<=0: raise ValueError('invalid series ID')
+        return self._get(f'tv/{identifier}/aggregate_credits')
+
     def configuration(self):
         """Explicit bounded caller-requested metadata authentication check."""
         return self._get('configuration')

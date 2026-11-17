@@ -19,6 +19,13 @@ from .image_validation import validate_image
 from .xmltv import IMAGE_HOSTS, public_image
 
 
+_METADATA_TTL = 30 * 86400
+_API_BODY_LIMIT = 8 * 1024 * 1024
+_MAX_BULK_EPISODES = 50_000
+_MAX_CAST = 100
+_MAX_EPISODE_SUMMARY = 32_768
+
+
 def parse_xmltv_ns(value):
     """Return known one-based season/episode, validating all XMLTV_NS fields.
 
@@ -114,7 +121,8 @@ class _Metadata:
     def movie(self, identifier):
         detail = self.owner._client(self.client, 'movie', identifier)
         title, year, hit = self.matches[identifier]
-        if not isinstance(detail, dict):
+        if (not isinstance(detail, dict) or type(detail.get('id')) is not int
+                or detail['id'] != identifier):
             raise _Unavailable('metadata mismatch')
         if (detail.get('title') and artwork.title_key(detail['title']) not in
                 {artwork.title_key(title), artwork.title_key(hit.get('title')),
@@ -154,17 +162,26 @@ class ArtworkEnricher:
         self.tmdb = tmdb
         self.tvmaze = tvmaze
         self.authorize_tvmaze = self.config.get('authorize_tvmaze', False) is True
+        self.tvmaze_bulk_metadata = self.config.get('tvmaze_bulk_metadata') is True
+        self.tmdb_credits = self.config.get('tmdb_credits') is True
         self.counts = {key: 0 for key in (
             'programmes_considered', 'programmes_eligible', 'programmes_matched',
             'unique_identities_considered', 'unique_identities_matched', 'ambiguous',
             'api_attempts', 'api_successes', 'api_errors', 'api_budget_exhausted',
+            'tmdb_api_attempts', 'tmdb_api_successes', 'tmdb_api_errors',
+            'tvmaze_api_attempts', 'tvmaze_api_successes', 'tvmaze_api_errors',
             'image_attempts', 'image_successes', 'image_errors', 'image_budget_exhausted',
             'image_cache_hits', 'metadata_cache_hits', 'verified_images',
-            'episode_year_unproven', 'episode_year_mismatched', 'show_year_unavailable')}
+            'episode_year_unproven', 'episode_year_mismatched', 'show_year_unavailable',
+            'programmes_with_added_credits', 'actors_added')}
         self.identities = set()
         self.matched_identities = set()
         self.last_request = None
         self.blocked_hosts = set()
+        self.last_metadata = None
+        self._episode_index = (None, None)
+        self._failed_bulk_shows = set()
+        self._failed_casts = set()
         if isinstance(tmdb, artwork.TMDB):
             # A separate client avoids mutating the caller's reusable client.
             self.tmdb = tmdb.clone(transport=self._api_transport, sleep=lambda _: None)
@@ -185,17 +202,29 @@ class ArtworkEnricher:
         self.last_request = time.monotonic()
 
     def _api_transport(self, url, headers):
-        host = urlsplit(url).hostname
-        if host not in {'api.themoviedb.org', 'api.tvmaze.com'} or host in self.blocked_hosts:
+        parts = urlsplit(url)
+        host = parts.hostname
+        if (parts.scheme != 'https' or parts.username or parts.password or parts.port not in (None, 443)
+                or parts.fragment or host not in {'api.themoviedb.org', 'api.tvmaze.com'}
+                or host in self.blocked_hosts):
             raise _Unavailable('metadata unavailable')
         return self._request(url, headers, host)
 
-    def _request(self, url, headers, host):
+    def _start_api_request(self, provider):
         if self.counts['api_attempts'] >= self.max_requests:
             self.counts['api_budget_exhausted'] += 1
             raise _Unavailable('metadata budget exhausted')
         self._pace()
         self.counts['api_attempts'] += 1
+        self.counts[f'{provider}_api_attempts'] += 1
+
+    def _record_api_result(self, provider, result):
+        self.counts[f'api_{result}'] += 1
+        self.counts[f'{provider}_api_{result}'] += 1
+
+    def _request(self, url, headers, host):
+        provider = 'tmdb' if host == 'api.themoviedb.org' else 'tvmaze'
+        self._start_api_request(provider)
         try:
             response = self.transport(url, headers)
             if response.status != 200:
@@ -212,32 +241,31 @@ class ArtworkEnricher:
                     if allowance:
                         time.sleep(allowance)
                 raise _Unavailable('metadata unavailable')
-            if not isinstance(response.body, bytes) or len(response.body) > 8 * 1024 * 1024:
+            if (not isinstance(response.body, bytes) or len(response.body) > _API_BODY_LIMIT
+                    or getattr(response, 'url', url) != url
+                    or any(k.lower() == 'location' for k in response.headers)):
                 raise _Unavailable('metadata unavailable')
         except (ValueError, TimeoutError, OSError, TypeError, AttributeError):
-            self.counts['api_errors'] += 1
+            self._record_api_result(provider, 'errors')
             raise _Unavailable('metadata unavailable') from None
-        self.counts['api_successes'] += 1
+        self._record_api_result(provider, 'successes')
         return response
 
     def _client(self, client, method, *args):
         if isinstance(client, (artwork.TMDB, artwork.TVMaze)):
             try:
                 return getattr(client, method)(*args)
-            except (ValueError, TimeoutError, OSError, TypeError, AttributeError):
+            except (ValueError, TimeoutError, OSError, TypeError, AttributeError, RecursionError):
                 raise _Unavailable('metadata unavailable') from None
         # Explicit injected clients without a transport are counted per operation.
-        if self.counts['api_attempts'] >= self.max_requests:
-            self.counts['api_budget_exhausted'] += 1
-            raise _Unavailable('metadata budget exhausted')
-        self._pace()
-        self.counts['api_attempts'] += 1
+        provider = 'tmdb' if client is self.tmdb else 'tvmaze'
+        self._start_api_request(provider)
         try:
             result = getattr(client, method)(*args)
         except (ValueError, TimeoutError, OSError, TypeError, AttributeError):
-            self.counts['api_errors'] += 1
+            self._record_api_result(provider, 'errors')
             raise _Unavailable('metadata unavailable') from None
-        self.counts['api_successes'] += 1
+        self._record_api_result(provider, 'successes')
         return result
 
     def verify_media(self, url):
@@ -429,35 +457,131 @@ class ArtworkEnricher:
                 records.append(record)
         return records
 
-    def _tvmaze_show(self, title, year):
-        key = json.dumps(['live-tvmaze-show-v2', artwork.title_key(title), year])
+    def _cached_metadata(self, key):
         found, value = self.state.cached(key)
-        if found:
-            self.counts['metadata_cache_hits'] += 1
+        self.counts['metadata_cache_hits'] += bool(found)
+        return found, value
+
+    @staticmethod
+    def _tvmaze_show_matches(show, title, year, identifier=None):
+        if (not isinstance(show, dict) or type(show.get('id')) is not int or show['id'] <= 0
+                or (identifier is not None and show['id'] != identifier)
+                or not title or artwork.title_key(show.get('name')) != title):
+            return False
+        if not year:
+            return True
+        premiere = show.get('premiered')
+        if not isinstance(premiere, str) or not re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2}', premiere):
+            return False
+        try:
+            return str(date.fromisoformat(premiere).year).zfill(4) == year
+        except ValueError:
+            return False
+
+    def _tvmaze_search(self, title, normalized):
+        key = json.dumps(['live-tvmaze-search-v1', normalized])
+        found, hits = self._cached_metadata(key)
+        if not found:
+            hits = self._client(self.tvmaze, 'search_series', title, None)
+            if not isinstance(hits, list) or not all(isinstance(hit, dict) for hit in hits):
+                raise _Unavailable('metadata unavailable')
+            self.state.cache(key, hits, _METADATA_TTL if hits else 86400)
+        return hits
+
+    def _tvmaze_show_detail(self, hit, title, year):
+        identifier = hit['id']
+        key = json.dumps(['live-tvmaze-show-detail-v1', identifier])
+        found, detail = self._cached_metadata(key)
+        if not found:
+            detail = self._tvmaze_json(f'https://api.tvmaze.com/shows/{identifier}', dict)
+        if (not self._tvmaze_show_matches(detail, title, year, identifier)
+                or (hit.get('premiered') and detail.get('premiered') != hit['premiered'])):
+            raise _Unavailable('metadata mismatch')
+        if not found:
+            self.state.cache(key, detail, _METADATA_TTL)
+        return detail
+
+    def _tvmaze_show(self, title, year):
+        normalized = artwork.title_key(title)
+        key = json.dumps(['live-tvmaze-show-v2', normalized, year])
+        found, value = self._cached_metadata(key)
+        if found and (value is None or self._tvmaze_show_matches(value, normalized, year)):
             return value
         try:
-            hits = self._client(self.tvmaze, 'search_series', title, int(year) if year else None)
-            candidates = {}
-            for hit in hits:
-                if (not isinstance(hit, dict) or type(hit.get('id')) is not int or hit['id'] <= 0
-                        or artwork.title_key(hit.get('name')) != artwork.title_key(title)
-                        or (year and str(hit.get('premiered') or hit.get('first_air_date') or '')[:4] != year)):
-                    continue
-                candidates[hit['id']] = hit
+            hits = self._tvmaze_search(title, normalized)
+            candidates = {hit['id']: hit for hit in hits
+                          if self._tvmaze_show_matches(hit, normalized, year)}
             value = None
             if len(candidates) > 1:
                 self.counts['ambiguous'] += 1
             if len(candidates) == 1:
-                identifier = next(iter(candidates))
-                detail = self._tvmaze_json(f'https://api.tvmaze.com/shows/{identifier}')
-                if (detail.get('id') != identifier or artwork.title_key(detail.get('name')) != artwork.title_key(title)
-                        or (year and str(detail.get('premiered') or '')[:4] != year)):
-                    raise _Unavailable('metadata mismatch')
-                value = detail
-            self.state.cache(key, value, 30 * 86400 if value else 86400)
+                value = self._tvmaze_show_detail(next(iter(candidates.values())), normalized, year)
+            self.state.cache(key, value, _METADATA_TTL if value else 86400)
             return value
         except (ValueError, TimeoutError, OSError, TypeError, AttributeError):
             return None
+
+    @staticmethod
+    def _tvmaze_episode_identity(episode, season, number):
+        return (isinstance(episode, dict) and type(episode.get('id')) is int and episode['id'] > 0
+                and episode.get('type', 'regular') == 'regular'
+                and type(episode.get('season')) is int and episode['season'] == season
+                and type(episode.get('number')) is int and episode['number'] == number)
+
+    @staticmethod
+    def _index_tvmaze_episodes(rows):
+        if len(rows) > _MAX_BULK_EPISODES:
+            raise _Unavailable('metadata unavailable')
+        index, episode_ids = {}, {}
+        for row in rows:
+            if (not isinstance(row, dict) or type(row.get('id')) is not int or row['id'] <= 0
+                    or 'season' not in row or 'number' not in row):
+                raise _Unavailable('metadata unavailable')
+            season, number = row['season'], row['number']
+            if any(n is not None and (type(n) is not int or n < 0) for n in (season, number)):
+                raise _Unavailable('metadata unavailable')
+            if not season or not number or row.get('type', 'regular') != 'regular':
+                continue
+            coordinate = f'{season}/{number}'
+            previous = episode_ids.get(row['id'])
+            if previous is not None:
+                index[previous] = None
+            if previous is not None or coordinate in index:
+                index[coordinate] = None
+            else:
+                episode = {key: row[key] for key in
+                    ('id', 'season', 'number', 'type', 'airdate', 'image', 'rating') if key in row}
+                for key, limit in (('name', 512), ('summary', _MAX_EPISODE_SUMMARY)):
+                    value = row.get(key)
+                    if isinstance(value, str) and len(value) <= limit:
+                        episode[key] = value
+                index[coordinate] = episode
+            episode_ids[row['id']] = coordinate
+        return index
+
+    def _tvmaze_episode_index(self, identifier):
+        # One in-memory index is enough for sequential lookups for a show.
+        # Other successful show indexes remain on disk for resumed visits.
+        active, index = self._episode_index
+        if active == identifier:
+            return index
+        if identifier in self._failed_bulk_shows:
+            return None
+        self._episode_index = (None, None)
+        key = json.dumps(['live-tvmaze-episodes-v1', identifier])
+        found, index = self._cached_metadata(key)
+        if not found:
+            try:
+                rows = self._tvmaze_json(f'https://api.tvmaze.com/shows/{identifier}/episodes', list)
+                index = self._index_tvmaze_episodes(rows)
+                if len(json.dumps(index)) > _API_BODY_LIMIT:
+                    raise _Unavailable('metadata unavailable')
+            except _Unavailable:
+                self._failed_bulk_shows.add(identifier)
+                return None
+            self.state.cache(key, index, _METADATA_TTL)
+        self._episode_index = (identifier, index)
+        return index
 
     def _tvmaze_lookup(self, title, year, episode):
         detail = self._tvmaze_show(title, '' if episode else year)
@@ -468,27 +592,129 @@ class ArtworkEnricher:
         season, number = episode
         identifier = detail['id']
         key = json.dumps(['live-tvmaze-episode-v2', identifier, season, number])
-        found, ep = self.state.cached(key)
-        if found:
-            self.counts['metadata_cache_hits'] += 1
+        index = self._tvmaze_episode_index(identifier) if self.tvmaze_bulk_metadata else None
+        found, cached = self._cached_metadata(key)
+        if index is not None:
+            coordinate = f'{season}/{number}'
+            ep = index.get(coordinate)
+            if ep is None:
+                self.counts['ambiguous'] += coordinate in index
+                return None
+        elif found:
+            ep = cached
         else:
             try:
-                ep = self._tvmaze_json(f'https://api.tvmaze.com/shows/{identifier}/episodebynumber?season={season}&number={number}')
-                if (ep.get('season') != season or ep.get('number') != number
-                        or type(ep.get('id')) is not int or ep['id'] <= 0):
-                    raise _Unavailable('metadata mismatch')
-                self.state.cache(key, ep, 30 * 86400)
-            except (ValueError, TimeoutError, OSError, TypeError, AttributeError):
+                ep = self._tvmaze_json(
+                    f'https://api.tvmaze.com/shows/{identifier}/episodebynumber?season={season}&number={number}', dict)
+            except _Unavailable:
                 return None
-        if not self._episode_year_matches(ep.get('airdate'), year):
+        if (not self._tvmaze_episode_identity(ep, season, number)
+                or not self._episode_year_matches(ep.get('airdate'), year)):
             return None
+        if not found or cached != ep:
+            self.state.cache(key, ep, _METADATA_TTL)
         return {'show': detail, 'episode': ep}
 
-    def _tvmaze_json(self, url):
-        data = json.loads(self._api_transport(url, {}).body)
-        if not isinstance(data, dict):
+    def _tvmaze_json(self, url, expected_type):
+        try:
+            data = json.loads(self._api_transport(url, {}).body)
+        except (ValueError, RecursionError):
+            raise _Unavailable('metadata unavailable') from None
+        if not isinstance(data, expected_type):
             raise _Unavailable('metadata unavailable')
         return data
+
+    @staticmethod
+    def _credit_text(value, limit):
+        if not isinstance(value, str):
+            return None
+        text = value.strip()
+        if (not 0 < len(text) <= limit or not text.isprintable()
+                or any(token in text.casefold() for token in ('<', '>', '://', 'www.'))):
+            return None
+        return text
+
+    def _credit_actors(self, provider, scope, identifier):
+        key = json.dumps(['live-credits-v1', provider, scope, identifier])
+        found, actors = self._cached_metadata(key)
+        if found:
+            return actors
+        if key in self._failed_casts:
+            return []
+        try:
+            if provider == 'tvmaze':
+                rows = self._tvmaze_json(f'https://api.tvmaze.com/shows/{identifier}/cast', list)
+            else:
+                method = 'movie_credits' if scope == 'movie' else 'series_credits'
+                if not callable(getattr(self.tmdb, method, None)):
+                    return []
+                data = self._client(self.tmdb, method, identifier)
+                if (not isinstance(data, dict) or type(data.get('id')) is not int
+                        or data['id'] != identifier or not isinstance(data.get('cast'), list)):
+                    raise _Unavailable('metadata mismatch')
+                rows = data['cast']
+        except _Unavailable:
+            self._failed_casts.add(key)
+            return []
+
+        actors, seen = [], set()
+        for row in rows[:_MAX_CAST]:
+            if not isinstance(row, dict):
+                continue
+            if provider == 'tvmaze':
+                person, role = row.get('person'), row.get('character')
+                name = person.get('name') if isinstance(person, dict) else None
+                character = role.get('name') if isinstance(role, dict) else None
+            else:
+                name, character = row.get('name'), row.get('character')
+                roles = row.get('roles')
+                if not character and isinstance(roles, list):
+                    character = next((role.get('character') for role in roles[:10]
+                                      if isinstance(role, dict) and self._credit_text(role.get('character'), 200)), None)
+            name = self._credit_text(name, 160)
+            character = self._credit_text(character, 200)
+            normalized = artwork.title_key(name)
+            if not name or not any(char.isalpha() for char in name) or normalized in seen:
+                continue
+            seen.add(normalized)
+            actor = {'name': name}
+            if character:
+                actor['character'] = character
+            actors.append(actor)
+        self.state.cache(key, actors, _METADATA_TTL if actors else 86400)
+        return actors
+
+    def _programme_credits(self, programme, provider, scope, identifier):
+        cast_scope = 'movie' if scope == 'movie' else 'series'
+        actors = self._credit_actors(provider, cast_scope, identifier)
+        if not actors:
+            return None
+        evidence = {'provider': provider, 'provider_id': identifier, 'scope': cast_scope,
+                    'applied_to_xmltv': False, 'actors': actors}
+        # A series cast listing cannot establish an actor's appearance in a
+        # particular episode. Keep its provenance without changing XML credits.
+        if scope == 'episode':
+            return evidence
+        credits = programme.find('credits')
+        seen = {artwork.title_key(node.text) for node in programme.findall('credits/actor')}
+        added = [actor for actor in actors if artwork.title_key(actor['name']) not in seen]
+        if not added:
+            return evidence
+        if credits is None:
+            preceding = {'title', 'sub-title', 'desc'}
+            position = next((i for i, node in enumerate(programme) if node.tag not in preceding), len(programme))
+            credits = ET.Element('credits')
+            programme.insert(position, credits)
+        position = next((i for i, node in enumerate(credits) if node.tag not in {'director', 'actor'}), len(credits))
+        for actor in added:
+            attributes = {'role': actor['character']} if 'character' in actor else {}
+            node = ET.Element('actor', attributes)
+            node.text = actor['name']
+            credits.insert(position, node)
+            position += 1
+        self.counts['programmes_with_added_credits'] += 1
+        self.counts['actors_added'] += len(added)
+        return dict(evidence, applied_to_xmltv=True, actors=added)
 
     def _record(self, programme, kind, url, provider, identifier, evidence):
         return {'type': kind, 'url': url, 'provider': provider, 'provider_id': identifier,
@@ -498,6 +724,7 @@ class ArtworkEnricher:
                 'start': programme.get('start'), 'stop': programme.get('stop')}
 
     def enrich(self, channel, programme):
+        self.last_metadata = None
         self.counts['programmes_considered'] += 1
         title = programme.findtext('title', '')
         year = programme.findtext('date', '')[:4]
@@ -565,13 +792,14 @@ class ArtworkEnricher:
         # Calling aggregate also exercises existing movie/episode positive/negative caches.
         result, _ = pipeline.aggregate([('bounded-event', tree)], _Cache(self, year if episode else None), metadata)
         enriched = result.find('programme')
-        matched = False
+        provider = scope = identifier = None
         tmdb_identity = enriched.findtext('episode-num[@system="tmdb"]', '')
         if tmdb_identity:
             parts = tmdb_identity.split('/')
             if len(parts) in (2, 4) and parts[0] in ('movie', 'tv') and parts[1].isdigit():
                 identifier = int(parts[1])
-                matched = True
+                provider = 'tmdb'
+                scope = 'movie' if parts[0] == 'movie' else 'episode'
                 for index, icon in enumerate(enriched.findall('icon')):
                     kind = 'episode_still' if parts[0] == 'tv' else 'poster' if index == 0 else 'backdrop'
                     # Existing enrichment emits only present paths; derive exact movie field below.
@@ -582,11 +810,11 @@ class ArtworkEnricher:
                             kind = 'backdrop'
                     records.append(self._record(enriched, kind, icon.get('src', ''), 'tmdb', identifier,
                         {'title': 'unicode_normalized_exact', 'year': year, 'episode': list(episode) if episode else None}))
-        if not matched and show and not episode and not source_ns and self.tmdb is not None:
+        if provider is None and show and not episode and not source_ns and self.tmdb is not None:
             hit = self._tmdb_show(title, year)
             detail = self._tmdb_series_detail(title, hit, year) if hit else None
             if detail:
-                matched = True
+                provider, scope = 'tmdb', 'series'
                 identifier = detail['id']
                 ET.SubElement(enriched, 'episode-num', {'system': 'tmdb'}).text = 'tv/' + str(identifier)
                 self._tmdb_series_metadata(enriched, detail)
@@ -594,7 +822,7 @@ class ArtworkEnricher:
                     {'title': 'unicode_normalized_exact', 'year': year or None,
                      'series_premiere': detail.get('first_air_date'), 'series_detail_identity': 'exact',
                      'episode': None}))
-        if matched and len(tmdb_identity.split('/')) == 4:
+        if provider == 'tmdb' and scope == 'episode':
             identifier = int(tmdb_identity.split('/')[1])
             key = json.dumps(['live-tmdb-episode-v1', identifier, *episode]) if episode else ''
             found, extra = self.state.cached(key)
@@ -636,23 +864,28 @@ class ArtworkEnricher:
                         identifier, dict(evidence, season_number=episode[0], season_id=season.get('id'),
                                          season_identity='exact'), scope='season')
                     records.extend(season_records)
-        if not matched and show and self.authorize_tvmaze:
+        if provider is None and show and self.authorize_tvmaze and (episode or not source_ns):
             value = self._tvmaze_lookup(title, year, episode)
             if value:
-                matched = True
+                provider, scope = 'tvmaze', 'episode' if episode else 'series'
                 detail, ep = value['show'], value['episode']
                 identifier = detail['id']
                 if enriched.find('episode-num[@system="tvmaze"]') is None:
                     ET.SubElement(enriched, 'episode-num', {'system': 'tvmaze'}).text = 'tv/' + str(identifier) + (f'/{episode[0]}/{episode[1]}' if episode else '')
-                summary = detail.get('summary')
-                if not enriched.findtext('desc') and isinstance(summary, str):
+                plot = ep if ep is not None and self.tvmaze_bulk_metadata else detail
+                summary = plot.get('summary')
+                if not enriched.findtext('desc') and isinstance(summary, str) and len(summary) <= _MAX_EPISODE_SUMMARY:
                     text = html.unescape(re.sub('<[^>]*>', '', summary)).strip()
-                    if text:
+                    if text and all(char.isprintable() or char in '\r\n\t' for char in text):
                         ET.SubElement(enriched, 'desc').text = text
+                if ep is not None and self.tvmaze_bulk_metadata and not enriched.findtext('sub-title'):
+                    name = self._credit_text(ep.get('name'), 512)
+                    if name:
+                        ET.SubElement(enriched, 'sub-title').text = name
                 for genre in detail.get('genres', []) if isinstance(detail.get('genres', []), list) else []:
                     if isinstance(genre, str) and genre.strip() and genre not in [c.text for c in enriched.findall('category')]:
                         ET.SubElement(enriched, 'category').text = genre
-                rating = detail.get('rating')
+                rating = (ep if ep is not None else detail).get('rating')
                 rating = rating.get('average') if isinstance(rating, dict) else None
                 if enriched.find('star-rating') is None and type(rating) in (int, float) and 0 < rating <= 10:
                     node = ET.SubElement(enriched, 'star-rating', {'system': 'TVMaze'})
@@ -666,6 +899,16 @@ class ArtworkEnricher:
                              'episode': list(episode) if episode else None, 'episode_id': ep.get('id') if ep else None,
                              'episode_airdate': ep.get('airdate') if ep else None,
                              'episode_year_validation': ('exact' if year else 'not_supplied') if ep else None}))
+        if provider:
+            self.last_metadata = {'provider': provider, 'provider_id': identifier, 'scope': scope}
+            if ((provider == 'tvmaze' and self.tvmaze_bulk_metadata)
+                    or (provider == 'tmdb' and self.tmdb_credits)):
+                credits = self._programme_credits(enriched, provider, scope, identifier)
+                if credits:
+                    self.last_metadata['credits'] = credits
+                    for record in records:
+                        if record['provider'] == provider:
+                            record['evidence']['credits'] = credits
         for icon in enriched.findall('icon'):
             enriched.remove(icon)
         records.extend(feed)
@@ -675,7 +918,7 @@ class ArtworkEnricher:
             record.update(self.verify_media(record['url']))
             if record['verified']:
                 ET.SubElement(enriched, 'icon', {'src': record['url']})
-        if matched:
+        if provider:
             self.counts['programmes_matched'] += 1
             if identity not in self.matched_identities:
                 self.matched_identities.add(identity)
