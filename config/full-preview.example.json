@@ -8,6 +8,7 @@
   "artwork": {
     "authorize_tvmaze": false,
     "tmdb_secret_env": "TMDB_READ_ACCESS_TOKEN",
+    "tmdb_http_binding": null,
     "max_requests": 200,
     "max_image_requests": 100,
     "request_interval": 0.55

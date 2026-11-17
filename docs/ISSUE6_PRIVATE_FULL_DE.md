@@ -17,8 +17,13 @@ ist unbekannt; 88 ist ausdrücklich ein Ausschnitt. Kein Umgehen dieser Grenze.
 Das separate Geräteprofil bleibt daher leer und darf nicht als nutzbarer Voll-EPG importiert werden.
 
 TVMaze-Live-Ergebnisse und genaue aktuelle SHA/Dateigrößen stehen im aggregierten
-`docs/issue6-acceptance.json`. Dieser Bericht ist während der abschließenden Integration
-als Zwischenstand gekennzeichnet. Echte Bildpfade wurden angefordert, gültige Zuordnungen,
+`docs/issue6-acceptance.json`. Der abschließende Export enthält **463 Sendungen mit
+500 geprüften Bildreferenzen: 463 Poster und 37 Episodenbilder, 55 unterschiedliche URLs**.
+Das sind 0,249 % aller gültigen Programme; Backdrops: 0. Alle 500 Referenzen wurden
+unabhängig gegen Originalprogramm, Identität und aktuelle Bildnachweise geprüft.
+38 frische Bildabrufe bestanden die stärkere Strukturprüfung; anschließend erzeugte
+eine reine Cache-Wiederholung ohne API-/Bildabruf identische GZIPs und ließ beide
+Ansichtsmanifeste unverändert. Echte Bildpfade wurden angefordert, gültige Zuordnungen,
 HTTP-Antworten und Bilddaten geprüft; Offline-Mocks gelten nicht als Live-Nachweis.
 
 Alle 88 zugänglichen privaten Providerlogos wurden aus dem Backup materialisiert und
@@ -30,7 +35,9 @@ wird keines davon einem Feed-Sender untergeschoben. Die XMLTV-Logoquote bleibt 0
 
 Der Benutzer hat ein persönliches HTTP-Secret `TMDB_READ_ACCESS_TOKEN` für
 `api.themoviedb.org` eingerichtet. Die laufende Instanz liefert weiterhin Revision 1,
-keine bereite Secret-Bindung und keinen Runtime-Platzhalter. Daher ausschließlich
+keine bereite Secret-Bindung und keinen Runtime-Platzhalter. Ein erneuter normaler
+Aufruf von `/3/configuration` über den geerbten Proxy ohne eigenen Authorization-Header
+lieferte HTTP 401. Daher ausschließlich
 **TMDB_LIVE_PENDING** für den authentifizierten Live-Test; Vollimport, TVMaze,
 Client-Implementierung und Regressionen werden fortgesetzt.
 
@@ -39,6 +46,25 @@ Zugangsdaten in Konfiguration, XMLTV, Sidecars, Logs oder Git. Verwalteten Proxy
 CA-Prüfung und geerbte Netzwerkeinstellungen unverändert verwenden. Ein neuer Auftrag
 muss die beobachtete Binding-Readiness prüfen und mit einem frischen Prozess testen.
 Keinen Platzhalterwert erfinden und den Token niemals im Chat anfordern.
+
+`artwork.tmdb_secret_env` akzeptiert ausschließlich `TMDB_READ_ACCESS_TOKEN`.
+Falls die Plattform stattdessen ein bereites HTTP-Secret injiziert, kann
+`artwork.tmdb_http_binding` die **beobachtete**, nicht erfundene Kontrollmetadatenform
+`{"name":"TMDB_READ_ACCESS_TOKEN","host":"api.themoviedb.org","state":"ready"}`
+enthalten. Der Client sendet dann keinen eigenen Authorization-Header und behält
+Proxy und TLS-Prüfung bei. `TMDB_RUNTIME_BOUND` bestätigt nur die Client-Bindung,
+keinen erfolgreichen Live-Test. Ohne Bindung bleibt `TMDB_LIVE_PENDING`; die anderen
+Quellen und TVMaze werden weiterverarbeitet.
+
+TMDB unterstützt Filme, Serien ohne Episodennummer und explizite Staffel/Folge.
+Titel/Jahr und Detailidentitäten werden konservativ geprüft, Episodenjahr gegen
+das Ausstrahlungsdatum der tatsächlichen Episode. Poster, Backdrops/Fanart,
+Episodenbilder und optionale Staffelposter erhalten getrennte Typen/Evidenz;
+Originaltitel, Genres, Beschreibungen und Bewertungen ergänzen fehlende Felder.
+Eine Serienbewertung wird nicht als fehlende Episodenbewertung ausgegeben.
+Ein fehlender optionaler Detail-/Staffelabruf verwirft kein bereits bestätigtes
+Episodenbild. Mocktests belegen diese Pfade, ersetzen aber nicht den ausstehenden
+authentifizierten TMDB-Live-Nachweis.
 
 ## Lokaler privater Ablauf
 
@@ -108,6 +134,14 @@ keine Rohquellen, Konfigurationen, Credentials oder privaten Cache-Datenbanken.
 Neue Übertragung nur nach erforderlicher Ziel-/Dateifreigabe und Prüfung von
 Eigentümerrechten; anschließend vollständiger Readback/Hashvergleich. Keine öffentliche Ausweichablage.
 
+Das V2-Paket ist lokal unter `work/private-full/issue6-backup-prepared/` vorbereitet:
+101 geprüfte Nutzdateien (19.837.885 Byte) plus `backup-index.json`. Das Inventar
+enthält Größe und SHA256 jeder Datei; Dateien/Verzeichnisse sind nur für den lokalen
+Eigentümer lesbar. Der private Drive-Projektordner wurde erneut als ungeteilt mit
+einer Owner-Berechtigung geprüft. Für dieses neue Paket erfolgte **kein Upload**.
+Die frühere Übertragungsfreigabe galt den vier Pilotdateien; für die neuen V2-Sidecars
+und Logo-Assets wird vor einer Übertragung die konkrete Ziel-/Dateifreigabe benötigt.
+
 ## QA und verbleibende Abnahmen
 
 ```sh
@@ -121,6 +155,9 @@ unter `/tmp` erforderlich; die Schutzprüfung wird nicht abgeschaltet. Tests umf
 mehr als 100 MB Streaming, mehr als 32 MB Streaming-Export, Bomben/XXE, DST, einzelne
 fehlerhafte Events, 5 parallele Source-Downloads, Mapping-Sperren, Artwork-Ambiguität,
 Cache-Migration, Budgets, echte Bildstruktur und atomaren Gesamt-Rollback.
+Abschließend bestanden 160 Regressionstests einschließlich 19 neuer TMDB-Integrationstests;
+die unabhängige TMDB-Nachprüfung bestand 65 fokussierte Tests. Ein gefundener
+Serien-/Episodenbewertungsfehler wurde vor der Abnahme korrigiert und erneut geprüft.
 
 Quellabdeckung ist nicht Geräteabdeckung; Zeitgrenzen sind nur verfügbare Zeit-Envelopes,
 keine erfundene Garantie lückenloser Programme über den ganzen angefragten Zeitraum.

@@ -15,18 +15,18 @@
   "conflicting_starts": 61,
   "overlaps_retained": 347,
   "full": {
-    "bytes": 16925520,
+    "bytes": 16927160,
     "channels": 1278,
     "channels_with_programmes": 1254,
     "channels_without_programmes": 24,
-    "file": "versions/ad9c90eefa762f9b41fc163746f88a3b535b01e8e9b7ccff23d72b13d659e544/xcmate-epg.xml.gz",
+    "file": "versions/444092846c43ae9e0dfcb36cb107a89e207234e7ed75af768cea4a7327076845/xcmate-epg.xml.gz",
     "programmes": 185945,
     "schema_version": 2,
-    "sha256": "ad9c90eefa762f9b41fc163746f88a3b535b01e8e9b7ccff23d72b13d659e544",
+    "sha256": "444092846c43ae9e0dfcb36cb107a89e207234e7ed75af768cea4a7327076845",
     "status": "ARTWORK_BLOCKED",
-    "version": "ad9c90eefa762f9b41fc163746f88a3b535b01e8e9b7ccff23d72b13d659e544",
+    "version": "444092846c43ae9e0dfcb36cb107a89e207234e7ed75af768cea4a7327076845",
     "view": "full",
-    "xml_bytes": 115127289
+    "xml_bytes": 115140292
   },
   "device": {
     "bytes": 110,
@@ -53,34 +53,35 @@
     "unmapped": 84
   },
   "artwork": {
-    "ambiguous": 11,
-    "api_attempts": 400,
-    "api_budget_exhausted": 44053,
+    "ambiguous": 0,
+    "api_attempts": 0,
+    "api_budget_exhausted": 44016,
     "api_errors": 0,
-    "api_successes": 400,
+    "api_successes": 0,
     "artwork_status": "verified",
     "episode_year_mismatched": 0,
     "episode_year_unproven": 0,
     "image_attempts": 0,
     "image_budget_exhausted": 0,
-    "image_cache_hits": 426,
+    "image_cache_hits": 500,
     "image_errors": 0,
     "image_successes": 0,
     "logo_coverage": 0.0,
     "logos_present": 0,
-    "metadata_cache_hits": 6015,
-    "programme_coverage": 0.0022910000268896715,
+    "metadata_cache_hits": 6428,
+    "programme_coverage": 0.002489983597300277,
     "programmes_considered": 185945,
     "programmes_eligible": 49194,
-    "programmes_matched": 426,
-    "programmes_with_verified_artwork": 426,
+    "programmes_matched": 463,
+    "programmes_with_verified_artwork": 463,
     "show_year_unavailable": 0,
+    "tmdb_live_status": "TMDB_LIVE_PENDING",
     "tmdb_status": "not_configured",
     "tvmaze_status": "authorized",
     "unique_identities_considered": 51350,
-    "unique_identities_matched": 43,
-    "verified_image_references": 426,
-    "verified_images": 426
+    "unique_identities_matched": 59,
+    "verified_image_references": 500,
+    "verified_images": 500
   },
   "provider_logos": {
     "bound_provider_channels": 88,
@@ -115,17 +116,6 @@
     "start": "2026-11-15T05:00:00+00:00",
     "stop": "2026-11-30T23:30:00+00:00"
   },
-  "acceptance_stage": "Checkpoint before final media-proof/runtime-secret integration; final verification pending",
-  "tmdb_live_status": "TMDB_LIVE_PENDING",
-  "tmdb_live_reason": "User configured a personal HTTP secret for future tasks; running instance still reports revision 1 with no ready binding and no runtime placeholder. No credential read or authenticated call attempted.",
-  "tests": {
-    "full_regression_tests_passed": 123,
-    "original_tests_preserved": 47,
-    "synthetic_smoke_passed": true,
-    "independent_mapping_and_artwork_code_reviews": true,
-    "private_mapping_logo_audit_passed": true
-  },
-  "transfer": "Private V2 backup preparation only; no new payload uploaded. Original private pilot retained.",
   "sources": [
     {
       "cache_status": "unchanged",
@@ -258,5 +248,97 @@
       },
       "valid_programmes": 144829
     }
-  ]
+  ],
+  "metadata_omissions": {
+    "UNVERIFIED_SOURCE_MEDIA": 258790
+  },
+  "acceptance_stage": "Final verified private source-complete export; overall device/artwork coverage remains partial",
+  "tmdb_live_status": "TMDB_LIVE_PENDING",
+  "tmdb_live_reason": "Running instance still has revision 1, no observed ready secret/runtime binding. A fresh normal configuration GET through inherited proxy without an explicit Authorization header returned HTTP 401. No token value was read or displayed.",
+  "tests": {
+    "full_regression_tests_passed": 160,
+    "full_regression_elapsed_seconds": 40.247,
+    "original_tests_preserved": 47,
+    "new_tmdb_integration_tests": 19,
+    "independent_tmdb_focused_tests_passed": 65,
+    "synthetic_smoke_passed": true,
+    "independent_full_branch_review": "approved after fixes",
+    "independent_tmdb_integration_review": "approved at b59445f; episode/series rating scope regression fixed",
+    "independent_mapping_logo_audit": "88 partial-catalog provider bindings/PNGs passed",
+    "independent_final_artwork_audit": "all 500 exported references passed"
+  },
+  "content_audit": {
+    "channels": 1278,
+    "programmes": 185945,
+    "metadata_preserved_programmes": 185945,
+    "metadata_mismatches": 0,
+    "unmatched_programmes": 0,
+    "icon_references": 500,
+    "sha256": "444092846c43ae9e0dfcb36cb107a89e207234e7ed75af768cea4a7327076845",
+    "xml_bytes": 115140292
+  },
+  "live_evidence": {
+    "provider": "tvmaze",
+    "main_live_pass_api_requests": 400,
+    "main_live_pass_api_errors": 0,
+    "episode_live_sample_programmes": 12,
+    "episode_live_sample_api_requests": 14,
+    "sample_counts_not_added_to_final_export": true,
+    "final_verified_programmes": 463,
+    "typed_references": {
+      "poster": 463,
+      "backdrop": 0,
+      "episode_still": 37
+    },
+    "distinct_verified_image_urls": 55,
+    "final_refresh_image_requests": 38,
+    "final_refresh_image_successes": 38,
+    "final_refresh_image_errors": 0,
+    "reused_distinct_structural_proofs": 17,
+    "final_refresh_elapsed_seconds": 102.674,
+    "final_refresh_peak_process_rss_bytes": 59527168,
+    "tmdb_authenticated_live_test_performed": false,
+    "image_proof_limit": "Bounded structure validation; JPEG/VP8 entropy/pixel decoding and Kodi rendering are not established."
+  },
+  "cache_only_replay": {
+    "elapsed_seconds": 78.402,
+    "peak_process_rss_bytes": 49385472,
+    "full_sha256": "444092846c43ae9e0dfcb36cb107a89e207234e7ed75af768cea4a7327076845",
+    "device_sha256": "0daba08f7a914feaa120a9d21efcc41ed7e33f56b0f8c565b96497e0d9b2a962",
+    "full_manifest_content_unchanged": true,
+    "full_manifest_mtime_unchanged": true,
+    "device_manifest_content_unchanged": true,
+    "device_manifest_mtime_unchanged": true,
+    "original_pilot_sha256": "3edde025d368f3069b541545b688a088ce7942132bf00209cdc460c161833f8e",
+    "api_requests": 0,
+    "image_requests": 0,
+    "image_cache_hits": 500
+  },
+  "run_integrity": {
+    "files_verified": 103,
+    "hashes_match": true,
+    "convenience_files_match": true,
+    "owner_only": true
+  },
+  "transfer": "New V2 payload prepared locally only; no new files uploaded. Owner-only unshared EPG-Agent Drive parent rechecked. Concrete new payload/target authorization and a fresh ACL/readback check are required before transfer.",
+  "remaining_gaps": [
+    "Provider catalog is partial: 88 cached entries; global denominator unknown. Full 78516224-byte catalog exceeds 33554432-byte connected file transfer limit.",
+    "No confirmed provider-to-feed mappings: 4 manual candidates, 84 unresolved; device 0/0, XMLTV logos 0/1278.",
+    "24 declared source channels have no programmes; available source time envelope does not cover requested 7 past/20 future days.",
+    "Artwork covers 463/185945 programmes; 44016 eligible attempts abstain at zero API budget during final cache replay. This counter is not a distinct-title count.",
+    "Authenticated TMDB live proof pending in current instance; all TMDB code tests are offline."
+  ],
+  "private_backup_preparation": {
+    "status": "PREPARED_NOT_UPLOADED",
+    "payload_files": 101,
+    "index_files": 1,
+    "payload_bytes": 19837885,
+    "sizes_sha256_and_owner_only_local_permissions_verified": true,
+    "source_configs_tokens_raw_inputs_and_cache_databases_excluded": true,
+    "drive_parent_shared": false,
+    "drive_parent_permission_roles": [
+      "owner"
+    ],
+    "new_upload_performed": false
+  }
 }
