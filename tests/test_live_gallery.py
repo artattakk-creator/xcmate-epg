@@ -218,6 +218,22 @@ class GalleryTests(unittest.TestCase):
                              for original in originals for r in records))
         self.assertFalse(any(original in self.requests for original in originals))
 
+    def test_unpaired_surrogate_in_rejected_original_query_does_not_block_medium(self):
+        original = 'https://static.tvmaze.com/poster.png?invalid=\ud800'
+        self.show['image'] = {'original': original, 'medium': CDN + 'poster-medium.png'}
+        self.routes['/shows/7/images'] = []
+        result, records = self.enrich()
+        self.assertEqual([node.get('src') for node in result.findall('icon')], [CDN + 'poster-medium.png'])
+        self.assertEqual(len(records), 2)
+        self.assertFalse(records[0]['verified'])
+        self.assertEqual(records[0]['url'], original)
+        self.assertTrue(records[1]['verified'])
+        self.assertEqual(records[1]['url'], CDN + 'poster-medium.png')
+        self.assertNotIn('fallback_from_sha256', records[1]['evidence'])
+        self.assertNotIn('fallback_from', records[1]['evidence'])
+        self.assertFalse(any(original in json.dumps(record['evidence'], ensure_ascii=False) for record in records))
+        self.assertNotIn(original, self.requests)
+
     def test_full_renderer_sanitizes_failed_original_and_preserves_medium_hash(self):
         from xcmate_epg.full_preview import run_full
 

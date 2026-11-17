@@ -1014,8 +1014,13 @@ class ArtworkEnricher:
                     emitted_urls.add(record['url'])
             elif id(record) in resolution_fallbacks:
                 resolution = resolution_fallbacks[id(record)]
-                evidence = dict(record['evidence'], resolution='medium',
-                    fallback_from_sha256=hashlib.sha256(record['url'].encode('utf-8')).hexdigest())
+                evidence = dict(record['evidence'], resolution='medium')
+                try:
+                    evidence['fallback_from_sha256'] = hashlib.sha256(record['url'].encode('utf-8')).hexdigest()
+                except UnicodeEncodeError:
+                    # Malformed provider text cannot block a separately valid
+                    # medium or enter nested evidence as a raw URL.
+                    pass
                 if 'provider_dimensions' in evidence:
                     evidence['provider_dimensions'] = {key: resolution[key] for key in ('width', 'height')}
                 medium = self._record(enriched, record['type'], resolution['url'],
