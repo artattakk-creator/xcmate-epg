@@ -42,6 +42,18 @@ def publish(root,directory):
     digest=hashlib.sha256(archive).hexdigest()
     directory=Path(directory)
     directory.mkdir(parents=True,exist_ok=True)
+    previous=directory/'manifest.json'
+    try:
+        existing=json.loads(previous.read_text())
+        expected=f'versions/{digest}/xcmate-epg.xml.gz'
+        if (existing.get('version')==digest and existing.get('sha256')==digest
+                and existing.get('file')==expected
+                and (directory/expected).read_bytes()==archive
+                and (directory/'xcmate-epg.xml.gz').read_bytes()==archive
+                and (directory/'xcmate-epg.xml.gz.sha256').read_text()==digest+'  xcmate-epg.xml.gz\n'):
+            return existing
+    except (OSError,ValueError,AttributeError):
+        pass
     version=directory/'versions'/digest
     version.mkdir(parents=True,exist_ok=True)
     atomic(version/'xcmate-epg.xml.gz',archive)

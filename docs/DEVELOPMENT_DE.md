@@ -20,12 +20,12 @@ der separat getestete HTTPS-Adapter ist noch kein aktivierter Quellenbetrieb.
 
 ## Phase A – Quellen und Zustand
 
-SQLite hält pro Quelle validierten Rohsnapshot, SHA256 und HTTP-Validatoren.
+SQLite hält pro Quelle validierten Rohsnapshot, normalisiertes XML, Ereignis-Fingerprints, SHA256 und HTTP-Validatoren. 304 und identische Payload-Hashes überspringen die Quellvalidierung; Alias-Änderungen erzwingen eine neue Normalisierung. Ereigniszeilen bleiben bei identischem Fingerprint erhalten.
 Erst nach erfolgreicher vollständiger Validierung werden Snapshot und Validatoren ersetzt.
 304 ohne Snapshot ist ein Fehler. Bis zu drei Versuche bei Timeout/429/5xx,
 mit begrenztem Backoff. HTTP-Redirects sind gesperrt, Requests haben Timeout und Größenlimit.
 Ausfälle verwenden quellenspezifisches LastGood. Ein vollständig fehlender Datenbestand
-kann keinen neuen EPG erzeugen. Kein Abruf echter Quellen wurde durchgeführt.
+kann keinen neuen EPG erzeugen. Kein Abruf echter Quellen wurde durchgeführt. `minimum_sources` (Standard 1) definiert die minimale Anzahl verwendbarer Quellen einschließlich gültiger LastGood-Snapshots; darunter bleibt das alte Manifest erhalten.
 
 Actions-Runner verlieren lokalen State. Die vorbereitete CI demonstriert Wiederherstellung
 über Actions Cache ausschließlich mit synthetischen Daten. Cache ist löschbar (TTL/Quota),
@@ -63,7 +63,7 @@ Kein Token wurde ausgelesen oder verwendet. Secret-Existenz nur aus dem Auftrag 
 
 ## Phase D – Export
 
-Deterministisches GZIP (mtime=0), SHA256 und Manifest v1.
+Deterministisches GZIP (mtime=0), SHA256 und Manifest v1. Unveränderte geprüfte Ausgaben werden nicht erneut geschrieben.
 `manifest.file` zeigt auf `versions/<sha256>/xcmate-epg.xml.gz`.
 Diese Version wird vor atomarem Manifest-Austausch vollständig geschrieben.
 Clients müssen Manifest-Version und Hash prüfen; stabile Root-Dateien sind Kompatibilitätskopien,
@@ -81,15 +81,15 @@ Keine kostenpflichtigen Dienste, KI-APIs oder neuen Abhängigkeiten.
 
 ## Offene Punkte und Grenzen
 
-- Issue #2 über REST und GraphQL: Forbidden; Inhalt konnte nicht verifiziert werden.
-- Verknüpfte private Masterinventur nicht verfügbar. Nur dokumentierte 519 unbestätigte
-  Provider-IDs berücksichtigt; keine privaten Backups gelesen oder kopiert.
+- Issue #2 und Master-Issue #485 nach CLI-Forbidden über den GitHub-Connector abgeglichen.
+- Dokumentierte Masterinventur berücksichtigt: drei Quellenfamilien und getrennte Provider-/Feed-Identitäten. Der private ID-Snapshot und die Backups wurden nicht gelesen oder kopiert; bestätigte Provider-IDs bedeuten weiterhin keine verifizierten Feed-Zuordnungen.
 - Feed-Adressen, Nutzungsrechte, Attribution und geschützte Persistenz müssen vor Echtbetrieb
   geprüft werden. Keine Quellenlizenz wird aus Personal Use abgeleitet.
 - Kein echtes TMDB/TVMaze-Ergebnis, GitHub-Actions-Lauf oder Android/Kodi-Test nachgewiesen.
 - TVMaze-Episodenbilder und private Logo-/Provider-Kataloge
   benötigen weitere Integration. Die CLI aktiviert noch kein Live-Artwork.
 - Kein vollwertiger XMLTV-DTD-Validator: bewusst eingeschränkte Struktur-/Sicherheitsprüfung.
+- TMDB-CDN-Größe ist aktuell fest auf w500 begrenzt; Konfigurations-/Größenauswahl via `/configuration` vor Live-Abnahme ergänzen.
 - Größenlimit ist absichtlich konservativ und muss mit freigegebenen Feeds vermessen werden.
 - LastGood kann veraltet sein; zukünftige Clients müssen die Sendungszeiträume beachten.
 
@@ -101,4 +101,4 @@ Kein Merge auf main, kein produktiver Pages-Upload, kein Kodi-Pilot-Eingriff.
 
 ## Review und Nachweise
 
-Separate Codeprüfung: defektes DEFLATE und nicht-stringförmige Bildpfade durch Regressionstests abgesichert; Senderreferenzen verwenden eine Menge für lineare Validierung. 30 lokale Unit-/Mocktests bestehen. Kein Live- oder Android-Nachweis daraus abgeleitet.
+Separate Codeprüfung: defektes DEFLATE und nicht-stringförmige Bildpfade durch Regressionstests abgesichert; Senderreferenzen verwenden eine Menge für lineare Validierung. 34 lokale Unit-/Mocktests bestehen. Kein Live- oder Android-Nachweis daraus abgeleitet.

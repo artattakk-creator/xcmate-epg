@@ -18,6 +18,6 @@ Export: unveränderliche Hash-Versionen, deterministisches GZIP und Manifest als
 Keine produktiven Pages- oder Schedule-Aktionen. Kodi bleibt unverändert.
 
 ## Nicht geklärt
-Issue #2 ist über GitHub API mit Forbidden blockiert. Keine konkreten Feed-Adressen,
+Issue #2 und Master-Issue #485 wurden nach CLI-Forbidden über den GitHub-Connector gelesen. Keine konkreten Feed-Adressen,
 keine geprüften Weitergaberechte und keine privaten bestätigten Senderzuordnungen verfügbar.
 Live-API-, GitHub-Actions- und Android-Abnahmen sind separate Schritte.

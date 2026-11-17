@@ -44,6 +44,9 @@ def run(state_path,output,config=None):
         if not sources:
             tree,status=refresh(state,'synthetic',lambda h:Response(200,DEMO,{}))
             trees=[(1,tree)]
+        minimum=config.get('minimum_sources',1)
+        if type(minimum) is not int or minimum<1 or len(trees)<minimum:
+            raise ValueError('source availability below configured threshold')
         tree,report=aggregate(trees,state,logos=config.get('logos'))
         return publish(tree,Path(output))
 
