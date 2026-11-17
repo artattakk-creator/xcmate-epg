@@ -1,6 +1,6 @@
 # XCMate EPG Agent
 
-Zentraler, optionaler XMLTV-Dienst für **XCMate / Kodi**. Ziel: EPGShare01 und Kaimandura inkrementell zusammenführen, TV-Programme mit TMDB-/TVMaze-Artwork und rechtlich zulässigen Senderlogos ergänzen, validierte XMLTV-GZIP-Datei über GitHub Pages bereitstellen.
+Zentraler, optionaler XMLTV-Dienst für **XCMate / Kodi**. Ziel: ausgewählte, rechtmäßig verwendbare EPG-Quellen inkrementell zusammenführen, TV-Programme mit freigegebenem Artwork und zulässigen Senderlogos ergänzen sowie eine validierte XMLTV-GZIP-Datei bereitstellen.
 
 > **Status: Einrichtung / noch kein produktiver EPG-Agent.** Keine echten Datenquellen, automatischen 24-Stunden-Jobs, TMDB-Secrets oder öffentliche EPG-Datei sind hier bislang eingerichtet. Kostenpflichtige Dienste werden nicht verwendet.
 
@@ -32,7 +32,8 @@ Die GitHub-Budgets bleiben auf 0 USD. Kein Budget erhöhen und keine kostenpflic
 - **Keine persönlichen Senderkataloge, Portaladressen, EPG-Zugangsdaten oder Backups** in dieses öffentliche Repository laden.
 - Der `TMDB_READ_ACCESS_TOKEN` muss später ausdrücklich und **separat als Repository-Secret** für dieses Repository angelegt werden; Repository-Secrets werden nicht automatisch zwischen Repositories geteilt.
 - TMDB-API-Anfragen verwenden den geheimen Bearer-Token; XMLTV-Bild-URLs dürfen **keinen** Token enthalten.
-- Quellen-/Artwork-Lizenzen und das Recht zur öffentlichen Weitergabe **vor** einer GitHub-Pages-Veröffentlichung prüfen.
+- Quellen-/Artwork-Lizenzen und das Recht zur öffentlichen Weitergabe **vor** einer GitHub-Pages-Veröffentlichung prüfen. **Personal Use** allein erlaubt keine öffentliche Wiederveröffentlichung.
+- Öffentliche XMLTV-/Pages-Dateien und Manifeste enthalten keine unnötigen Ursprungsquellen-Namen, Feed-URLs oder internen Fetch-/Debug-Informationen. Rechtlich verpflichtende Attribution darf nicht entfallen; bei Konflikt keine öffentliche Veröffentlichung.
 - Keine täglichen Jobs oder Veröffentlichungen ohne separate Freigabe; Fehler dürfen niemals den letzten gültigen EPG überschreiben.
 
 Die Architektur wird schrittweise implementiert, unabhängig vom derzeitigen Pilot-XCMate `0.1.29.97`.
