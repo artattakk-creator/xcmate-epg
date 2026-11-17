@@ -1,0 +1,6 @@
+{
+  "catalog_complete": false,
+  "catalog": [],
+  "confirmations": [],
+  "note": "Fill only in an ignored private copy. Names and provider EPG hints create review candidates, never confirmations. Explicit confirmation rows require provider_id, qualified_id and evidence; locked=true preserves a manual override."
+}
