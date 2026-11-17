@@ -74,6 +74,43 @@ class ChannelMappingTests(unittest.TestCase):
         entry = self.api().build_mapping([{"provider_id": "p1", "name": "Example News"}], confirmations, self.channels())["entries"][0]
         self.assertEqual(entry["qualified_id"], "s2:news")
 
+    def test_missing_locked_target_survives_persistence_and_restoration(self):
+        catalog = [{"provider_id": "p1", "name": "Example News"}]
+        missing_lock = {"provider_id": "p1", "qualified_id": "s9:primary", "evidence": "synthetic manual override", "locked": True}
+        fallback = {"provider_id": "p1", "qualified_id": "s1:news", "evidence": "synthetic fallback review"}
+        result = self.api().build_mapping(catalog, [missing_lock, fallback], self.channels())
+        entry = result["entries"][0]
+        self.assertEqual(entry["status"], "candidate_manual_review")
+        self.assertIsNone(entry["qualified_id"])
+        self.assertEqual(result["summary"]["mapped_provider_channels"], 0)
+        self.assertEqual(result["summary"]["coverage"], 0)
+        self.assertIn("locked_confirmation_target_missing", entry["evidence"])
+        self.assertIn(missing_lock["evidence"], entry["evidence"])
+        self.assertEqual(entry["unresolved_confirmations"], [missing_lock])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "mapping.json"
+            self.api().persist_mapping(result, path)
+            stored = json.loads(path.read_text())
+        retained = stored["entries"][0]["unresolved_confirmations"]
+        restored_channels = self.channels() + [{"qualified_id": "s9:primary", "name": "Example News", "source": "s9", "priority": 99}]
+        restored = self.api().build_mapping(catalog, retained + [fallback], restored_channels)
+        self.assertEqual(restored["entries"][0]["status"], "confirmed")
+        self.assertEqual(restored["entries"][0]["qualified_id"], "s9:primary")
+        self.assertEqual(restored["entries"][0]["unresolved_confirmations"], [])
+        self.assertIn(missing_lock["evidence"], restored["entries"][0]["evidence"])
+
+    def test_missing_lock_conflicts_with_a_different_present_lock(self):
+        catalog = [{"provider_id": "p1", "name": "Example News"}]
+        missing = {"provider_id": "p1", "qualified_id": "s9:primary", "evidence": "synthetic unavailable lock", "locked": True}
+        present = {"provider_id": "p1", "qualified_id": "s1:news", "evidence": "synthetic present lock", "locked": True}
+        result = self.api().build_mapping(catalog, [missing, present], self.channels())
+        entry = result["entries"][0]
+        self.assertEqual(entry["status"], "candidate_manual_review")
+        self.assertIsNone(entry["qualified_id"])
+        self.assertEqual(entry["unresolved_confirmations"], [missing])
+        self.assertIn("conflicting_locked_confirmations", entry["evidence"])
+        self.assertEqual(result["summary"]["mapped_provider_channels"], 0)
+
     def test_resolution_variants_require_review(self):
         result = self.api().build_mapping([{"provider_id": "p1", "name": "Example News (SD)"}], [], self.channels())
         entry = result["entries"][0]

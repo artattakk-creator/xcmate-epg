@@ -33,6 +33,8 @@ def build_mapping(catalog, confirmations, channels):
 
     ``confirmed_sources`` contains evidence records, including locked records in
     conflict. Such records are retained for review, never selected automatically.
+    Missing locked targets stay replayable in ``unresolved_confirmations`` and
+    block selection until restored or explicitly resolved by the reviewer.
     Unknown confirmation references are counted without manufacturing providers.
     """
     providers = {}
@@ -67,6 +69,7 @@ def build_mapping(catalog, confirmations, channels):
             by_base[_without_resolution(name)].add(qid)
 
     explicit, problems = defaultdict(dict), defaultdict(set)
+    unresolved = defaultdict(list)
     invalid = 0
     for row in confirmations:
         pid, qid = row.get("provider_id"), row.get("qualified_id")
@@ -75,6 +78,14 @@ def build_mapping(catalog, confirmations, channels):
             continue
         if not isinstance(qid, str) or qid not in feeds:
             problems[pid].add("confirmation_target_missing")
+            if row.get("locked") is True:
+                problems[pid].add("locked_confirmation_target_missing")
+                unresolved[pid].append({
+                    "provider_id": pid,
+                    "qualified_id": qid if isinstance(qid, str) else None,
+                    "evidence": row.get("evidence") if isinstance(row.get("evidence"), str) else "",
+                    "locked": True,
+                })
             invalid += 1
             continue
         if not _text(row.get("evidence")) or not isinstance(row.get("locked", False), bool):
@@ -104,22 +115,27 @@ def build_mapping(catalog, confirmations, channels):
                 candidate([provider["epg_id"]], "provider_epg_id", 0.95)
         confirmed = [{**r, "evidence": sorted(r["evidence"])} for r in explicit[pid].values()]
         confirmed.sort(key=lambda r: (r["priority"], r["source"], r["qualified_id"]))
+        unavailable = sorted(unresolved[pid], key=lambda r: (r["qualified_id"] or "", r["evidence"]))
         locked = [r for r in confirmed if r["locked"]]
         evidence = set(problems[pid])
-        if len(locked) > 1:
+        if len({r["qualified_id"] for r in locked + unavailable}) > 1:
             evidence.add("conflicting_locked_confirmations")
         # Distinct IDs inside one source are not source fallbacks. A single lock
         # can resolve that ambiguity; otherwise it remains reviewable.
         if not locked and len({r["source"] for r in confirmed}) < len(confirmed):
             evidence.add("conflicting_source_confirmations")
         conflicted = any(x.startswith("conflicting_") for x in evidence)
-        selected = None if conflicted or not confirmed else (locked or confirmed)[0]["qualified_id"]
+        selected = None if unavailable or conflicted or not confirmed else (locked or confirmed)[0]["qualified_id"]
         for record in confirmed:
             evidence.update(record["evidence"])
+        for record in unavailable:
+            if _text(record["evidence"]):
+                evidence.add(record["evidence"])
         status = "confirmed" if selected else "candidate_manual_review" if matches or evidence or confirmed else "unmapped"
         entries.append({
             "provider_id": pid, "name": provider["name"], "status": status,
             "qualified_id": selected, "confirmed_sources": confirmed,
+            "unresolved_confirmations": unavailable,
             "candidates": sorted(matches.values(), key=lambda r: (-r["confidence"], feeds[r["qualified_id"]]["priority"], r["qualified_id"])),
             "evidence": sorted(evidence),
         })
