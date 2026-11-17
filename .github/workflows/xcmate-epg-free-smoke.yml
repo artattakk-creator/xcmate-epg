@@ -1,0 +1,30 @@
+name: XCMate EPG - free offline smoke
+
+on:
+  push:
+    branches:
+      - bootstrap/free-smoke-20261117
+    paths:
+      - "tools/**"
+      - "tests/**"
+      - ".github/workflows/xcmate-epg-free-smoke.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-free-runner:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout project source
+        uses: actions/checkout@v4
+      - name: Run isolated Python standard-library tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Generate DEMO only in temporary runner folder
+        run: python3 tools/smoke_xmltv.py --output "$RUNNER_TEMP/xcmate-epg-offline-demo"
+      - name: Confirm no production job or publish
+        run: |
+          test -f "$RUNNER_TEMP/xcmate-epg-offline-demo/manifest.demo.json"
+          echo "SAFE_DEMO_ONLY no network no secrets no schedule no publish"
