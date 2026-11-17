@@ -36,7 +36,7 @@ class MovieClient:
         return [dict(id=2, name='Example', first_air_date='2020-01-01')]
     def episode(self, identifier, season, number):
         self.calls += 1
-        return dict(id=3, season_number=season, episode_number=number, still_path='/still.jpg')
+        return dict(id=3, season_number=season, episode_number=number, air_date='2020-01-01', still_path='/still.jpg')
 
 
 class LiveArtworkTests(unittest.TestCase):
@@ -133,7 +133,7 @@ class LiveArtworkTests(unittest.TestCase):
             if 'search/shows' in url:
                 body=[{'show':dict(id=7,name='Example',premiered='2020-01-01')}]
             elif '/episodebynumber' in url:
-                body=dict(id=9,season=1,number=2)
+                body=dict(id=9,season=1,number=2,airdate='2020-01-01')
             else:
                 body=dict(id=7,name='Example',premiered='2020-01-01')
             return Response(200,json.dumps(body).encode(),{})
@@ -190,7 +190,7 @@ class LiveArtworkTests(unittest.TestCase):
     def test_episode_metadata_and_show_images_are_retained_without_overwrite(self):
         client=MovieClient()
         client.search_series=lambda *args:[dict(id=2,name='Example',original_name='Original',original_language='en',first_air_date='2020-01-01',poster_path='/show.jpg',backdrop_path='/wide.jpg')]
-        client.episode=lambda *args:dict(id=3,season_number=1,episode_number=2,still_path='/still.jpg',overview='Episode description',name='Episode name',vote_average=8)
+        client.episode=lambda *args:dict(id=3,season_number=1,episode_number=2,air_date='2020-01-01',still_path='/still.jpg',overview='Episode description',name='Episode name',vote_average=8)
         result,records=self.adapter(tmdb=client,transport=self.image).enrich(*event(episode=True,category='series'))
         self.assertEqual(result.findtext('desc'),'Episode description')
         self.assertEqual(result.findtext('sub-title'),'Episode name')
@@ -246,7 +246,7 @@ class LiveArtworkTests(unittest.TestCase):
             if 'search/shows' in url:
                 body=[{'show':dict(id=7,name='Example',premiered='2020-01-01',type='Scripted')}]
             elif '/episodebynumber' in url:
-                body=dict(id=9,season=1,number=2,image={'original':'https://static.tvmaze.com/uploads/images/original_untouched/1/2.jpg'})
+                body=dict(id=9,season=1,number=2,airdate='2020-01-01',image={'original':'https://static.tvmaze.com/uploads/images/original_untouched/1/2.jpg'})
             else:
                 body=dict(id=7,name='Example',premiered='2020-01-01',type='Scripted',genres=['Drama'],summary='<p>Show description</p>',image={'original':'https://static.tvmaze.com/uploads/images/original_untouched/1/1.jpg'})
             if 'static.tvmaze.com' in url: return self.image(url,headers)
@@ -275,7 +275,6 @@ class LiveArtworkTests(unittest.TestCase):
             self.assertEqual(self.state.db.execute('SELECT count(*) FROM artwork').fetchone()[0],0)
             self.assertTrue(all(call.args[0]<=5 for call in sleep.call_args_list))
 
-if __name__=='__main__': unittest.main()
 
 class MediaVerifierTests(unittest.TestCase):
     setUp = LiveArtworkTests.setUp
@@ -313,3 +312,148 @@ class MediaVerifierTests(unittest.TestCase):
         self.assertEqual(adapter.summary()['api_errors'],1)
         self.assertEqual(self.state.db.execute('SELECT count(*) FROM artwork').fetchone()[0],0)
         self.assertIn(1,[call.args[0] for call in sleep.call_args_list])
+
+class EpisodeIntegrationTests(unittest.TestCase):
+    setUp = LiveArtworkTests.setUp
+    tearDown = LiveArtworkTests.tearDown
+    adapter = LiveArtworkTests.adapter
+    image = LiveArtworkTests.image
+
+    def test_xmltv_ns_optional_parts_totals_and_whitespace(self):
+        from xcmate_epg.live_artwork import parse_xmltv_ns
+        for text,want in (('0 . 1 . 0/1',(1,2)),('1/4.2/8.',(2,3)),(' 0 / 1 . 1 / 3 . ',(1,2)),('0.1.',(1,2)),('0.1',(1,2)),('0.1./2',(1,2))):
+            with self.subTest(text=text):
+                self.assertEqual(parse_xmltv_ns(text),want)
+        for text in (' .1.', '0. .', '/2.1.', '0/0.1.', '1/1.1.', '0.2/2.', '0.1.1/1', '0.1.-1', '0.1.0/0', '-1.1.', '0.1.extra', '0.1.0.1', '0/unknown.1.'):
+            with self.subTest(text=text):
+                self.assertIsNone(parse_xmltv_ns(text))
+
+    def test_canonical_episode_passes_existing_tmdb_and_preserves_source_text(self):
+        channel,p=event(episode=True,category='series')
+        original=' 0 / 3 . 1 / 10 . 0/1 '
+        p.find('episode-num').text=original
+        client=MovieClient()
+        client.episode=lambda *args:dict(id=3,season_number=1,episode_number=2,air_date='2020-01-01',still_path='/still.jpg')
+        result,records=self.adapter(tmdb=client,transport=self.image).enrich(channel,p)
+        self.assertEqual(result.findtext('episode-num[@system="xmltv_ns"]'),original)
+        self.assertEqual(result.findtext('episode-num[@system="tmdb"]'),'tv/2/1/2')
+        self.assertEqual([r['type'] for r in records],['episode_still'])
+        self.assertEqual(records[0]['evidence']['episode'],[1,2])
+
+    def tvmaze_transport(self,url,headers):
+        from urllib.parse import parse_qs, urlsplit
+        if 'static.tvmaze.com' in url:
+            return self.image(url,headers)
+        if 'search/shows' in url:
+            body=[{'show':dict(id=7,name='Example',premiered='2010-01-01')}]
+        elif '/episodebynumber' in url:
+            params=parse_qs(urlsplit(url).query)
+            body=dict(id=100+int(params['number'][0]),season=int(params['season'][0]),number=int(params['number'][0]),airdate='2020-01-01',image={'original':'https://static.tvmaze.com/uploads/images/episode.jpg'})
+        else:
+            body=dict(id=7,name='Example',premiered='2010-01-01',image={'original':'https://static.tvmaze.com/uploads/images/show.jpg'})
+        return Response(200,json.dumps(body).encode(),{})
+
+    def test_tvmaze_episode_air_year_not_show_premiere_and_shared_show_cache(self):
+        adapter=self.adapter(config={'authorize_tvmaze':True},transport=self.tvmaze_transport)
+        for text,identity in (('0 . 1 . 0/1','tv/7/1/2'),('0/2.2/8.','tv/7/1/3')):
+            channel,p=event(episode=True,category='series')
+            p.find('episode-num').text=text
+            result,records=adapter.enrich(channel,p)
+            self.assertEqual(result.findtext('episode-num[@system="tvmaze"]'),identity)
+            self.assertTrue(next(r for r in records if r['type']=='episode_still')['verified'])
+            self.assertEqual(result.findtext('date'),'2020')
+            self.assertEqual(result.findtext('episode-num[@system="xmltv_ns"]'),text)
+        self.assertEqual(adapter.summary()['api_attempts'],4)
+        cached=self.adapter(config={'authorize_tvmaze':True},transport=lambda *args:self.fail('persistent show/episode cache missed'))
+        cached.enrich(*event(episode=True,category='series'))
+        self.assertEqual(cached.summary()['api_attempts'],0)
+
+    def test_episode_year_mismatch_and_unproven_year_are_not_episode_matches(self):
+        for date in ('2021-01-01',None):
+            self.state.db.execute('DELETE FROM artwork')
+            def transport(url,headers):
+                response=self.tvmaze_transport(url,headers)
+                if '/episodebynumber' in url:
+                    data=json.loads(response.body)
+                    data['airdate']=date
+                    return Response(200,json.dumps(data).encode(),{})
+                return response
+            adapter=self.adapter(config={'authorize_tvmaze':True},transport=transport)
+            result,records=adapter.enrich(*event(episode=True,category='series'))
+            self.assertFalse(any(r['type']=='episode_still' for r in records))
+            self.assertIsNone(result.find('episode-num[@system="tvmaze"]'))
+            self.assertEqual(adapter.summary()['programmes_matched'],0)
+            metric='episode_year_mismatched' if date else 'episode_year_unproven'
+            self.assertEqual(adapter.summary()[metric],1)
+
+    def test_tmdb_shared_exact_show_match_checks_actual_episode_air_year(self):
+        client=MovieClient()
+        def series(*args):
+            client.calls+=1
+            return [dict(id=2,name='Example',first_air_date='2010-01-01')]
+        def episode(identifier,season,number):
+            client.calls+=1
+            return dict(id=number,season_number=season,episode_number=number,air_date='2020-01-01',still_path='/still.jpg')
+        client.search_series=series
+        client.episode=episode
+        adapter=self.adapter(tmdb=client,transport=self.image)
+        for ns in ('0 . 1 . 0/1','0.2.'):
+            channel,p=event(episode=True,category='series')
+            p.find('episode-num').text=ns
+            result,records=adapter.enrich(channel,p)
+            self.assertTrue(records[0]['verified'])
+            self.assertEqual(result.findtext('date'),'2020')
+        self.assertEqual(client.calls,3)
+        self.assertEqual(adapter.summary()['programmes_matched'],2)
+
+    def test_invalid_ns_does_not_slip_through_legacy_episode_pipeline(self):
+        channel,p=event(episode=True,category='series')
+        ET.SubElement(p,'episode-num',system='xmltv_ns').text='0.2.'
+        client=MovieClient()
+        result,records=self.adapter(tmdb=client,transport=self.image).enrich(channel,p)
+        self.assertEqual(records,[])
+        self.assertEqual(client.calls,0)
+        self.assertEqual([n.text for n in result.findall('episode-num[@system="xmltv_ns"]')],['0.1.','0.2.'])
+
+    def test_transient_episode_failure_keeps_show_cache_and_retries_episode(self):
+        fail=[True]
+        def transport(url,headers):
+            if '/episodebynumber' in url and fail[0]:
+                fail[0]=False
+                return Response(503,b'',{})
+            return self.tvmaze_transport(url,headers)
+        adapter=self.adapter(config={'authorize_tvmaze':True},transport=transport)
+        self.assertEqual(adapter.enrich(*event(episode=True,category='series'))[1],[])
+        result,records=adapter.enrich(*event(episode=True,category='series'))
+        self.assertTrue(next(r for r in records if r['type']=='episode_still')['verified'])
+        self.assertEqual(adapter.summary()['api_attempts'],4)
+
+    def test_episode_cache_rechecks_programme_year_for_both_providers(self):
+        for provider in ('tmdb','tvmaze'):
+            self.state.db.execute('DELETE FROM artwork')
+            adapter=(self.adapter(tmdb=MovieClient(),transport=self.image) if provider=='tmdb' else
+                     self.adapter(config={'authorize_tvmaze':True},transport=self.tvmaze_transport))
+            result,records=adapter.enrich(*event(episode=True,category='series'))
+            self.assertTrue(any(r['type']=='episode_still' for r in records))
+            calls=adapter.summary()['api_attempts']
+            result,records=adapter.enrich(*event(episode=True,category='series',year='2021'))
+            self.assertEqual(records,[])
+            self.assertEqual(adapter.summary()['api_attempts'],calls)
+            self.assertEqual(adapter.summary()['episode_year_mismatched'],1)
+            self.assertEqual(adapter.summary()['programmes_matched'],1)
+
+    def test_non_episode_show_keeps_premiere_year_constraint(self):
+        adapter=self.adapter(config={'authorize_tvmaze':True},transport=self.tvmaze_transport)
+        result,records=adapter.enrich(*event(category='series',year='2020'))
+        self.assertEqual(records,[])
+        self.assertEqual(adapter.summary()['programmes_matched'],0)
+        self.assertEqual(adapter.summary()['api_attempts'],1)
+
+    def test_episode_without_programme_year_preserves_absence(self):
+        adapter=self.adapter(tmdb=MovieClient(),transport=self.image)
+        result,records=adapter.enrich(*event(episode=True,category='series',year=''))
+        self.assertTrue(any(r['type']=='episode_still' for r in records))
+        self.assertIsNone(result.find('date'))
+
+
+if __name__=='__main__': unittest.main()

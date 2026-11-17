@@ -4,6 +4,7 @@ No environment credentials are read. Input source artwork remains private until 
 concrete image has passed the same verifier used for provider artwork.
 """
 import copy
+from datetime import date
 import hashlib
 import html
 import json
@@ -17,6 +18,34 @@ from .fetch import http_get
 from .xmltv import IMAGE_HOSTS, public_image
 
 
+def parse_xmltv_ns(value):
+    """Return known one-based season/episode, validating all XMLTV_NS fields.
+
+    XMLTV indexes are zero-based; optional totals count items. Unknown season
+    or episode cannot identify a provider episode. An omitted/unknown part is
+    harmless, but any supplied index/total must still be valid.
+    """
+    if not isinstance(value, str) or len(value) > 256:
+        return None
+    fields = value.split('.')
+    if len(fields) == 2:
+        fields.append('')
+    if len(fields) != 3:
+        return None
+    result = []
+    for index, field in enumerate(fields):
+        match = re.fullmatch(r'\s*([0-9]+)?\s*(?:/\s*([0-9]+)\s*)?', field)
+        if not match:
+            return None
+        number, total = (int(n) if n is not None else None for n in match.groups())
+        if index < 2 and number is None:
+            return None
+        if total is not None and (total <= 0 or (number is not None and number >= total)):
+            return None
+        result.append(number)
+    return result[0] + 1, result[1] + 1
+
+
 class _Unavailable(ValueError):
     pass
 
@@ -27,26 +56,41 @@ class _Cache:
     Legacy entries stay private and intact, but their original format does not
     prove current exact-title/year/episode checks, so they cannot make matches.
     """
-    def __init__(self, owner):
+    def __init__(self, owner, episode_year=None):
         self.owner = owner
+        self.episode_year = episode_year
 
     def cached(self, key):
-        found, value = self.owner.state.cached(json.dumps(['live-artwork-v2', key]))
+        found, value = self.owner.state.cached(json.dumps(['live-artwork-v3', key]))
         self.owner.counts['metadata_cache_hits'] += bool(found)
+        if found and value and self.episode_year is not None:
+            identity = json.loads(key)
+            if identity[0] == 'tv':
+                extra_key = json.dumps(['live-tmdb-episode-v1', value['id'], identity[3], identity[4]])
+                extra_found, extra = self.owner.state.cached(extra_key)
+                if not extra_found:
+                    return False, None
+                if not self.owner._episode_year_matches(extra['detail'].get('air_date'), self.episode_year):
+                    return True, None
         return found, value
 
     def cache(self, key, value, ttl):
-        self.owner.state.cache(json.dumps(['live-artwork-v2', key]), value, ttl)
+        self.owner.state.cache(json.dumps(['live-artwork-v3', key]), value, ttl)
 
 
 class _Metadata:
     """Keep the existing enrichment/cache path, with counted client operations."""
-    def __init__(self, owner, client):
+    def __init__(self, owner, client, episode_year=''):
         self.owner, self.client = owner, client
+        self.episode_year = episode_year
         self.matches = {}
 
     def _search(self, kind, title, year):
-        hits = self.owner._client(self.client, 'search' if kind == 'movie' else 'search_series', title, year)
+        if kind == 'tv':
+            show = self.owner._tmdb_show(title)
+            hits = [show] if show else []
+        else:
+            hits = self.owner._client(self.client, 'search', title, year)
         if not isinstance(hits, list):
             raise _Unavailable('metadata unavailable')
         names = ('title', 'original_title') if kind == 'movie' else ('name', 'original_name')
@@ -85,6 +129,8 @@ class _Metadata:
         if (not isinstance(detail, dict) or detail.get('season_number') != season
                 or detail.get('episode_number') != number):
             raise _Unavailable('metadata mismatch')
+        if not self.owner._episode_year_matches(detail.get('air_date'), self.episode_year):
+            raise _Unavailable('episode date unavailable or mismatched')
         show = self.matches.get(identifier, ('', '', {}))[2]
         key = json.dumps(['live-tmdb-episode-v1', identifier, season, number])
         self.owner.state.cache(key, {'show': show, 'detail': detail}, 30 * 86400)
@@ -111,7 +157,8 @@ class ArtworkEnricher:
             'unique_identities_considered', 'unique_identities_matched', 'ambiguous',
             'api_attempts', 'api_successes', 'api_errors', 'api_budget_exhausted',
             'image_attempts', 'image_successes', 'image_errors', 'image_budget_exhausted',
-            'image_cache_hits', 'metadata_cache_hits', 'verified_images')}
+            'image_cache_hits', 'metadata_cache_hits', 'verified_images',
+            'episode_year_unproven', 'episode_year_mismatched', 'show_year_unavailable')}
         self.identities = set()
         self.matched_identities = set()
         self.last_request = None
@@ -243,8 +290,47 @@ class ArtworkEnricher:
             self.state.cache(key, result, 30 * 86400 if result['verified'] else 86400)
         return result
 
-    def _tvmaze_lookup(self, title, year, episode):
-        key = json.dumps(['live-tvmaze-v1', artwork.title_key(title), year, episode])
+    def _episode_year_matches(self, airdate, year):
+        if not year:
+            return True
+        if not isinstance(airdate, str) or not re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2}', airdate):
+            self.counts['episode_year_unproven'] += 1
+            return False
+        try:
+            date.fromisoformat(airdate)
+        except ValueError:
+            self.counts['episode_year_unproven'] += 1
+            return False
+        if airdate[:4] != year:
+            self.counts['episode_year_mismatched'] += 1
+            return False
+        return True
+
+    def _tmdb_show(self, title):
+        """A programme episode year cannot constrain the series premiere."""
+        key = json.dumps(['live-tmdb-show-v1', artwork.title_key(title)])
+        found, hit = self.state.cached(key)
+        if found:
+            self.counts['metadata_cache_hits'] += 1
+            return hit
+        try:
+            hits = self._client(self.tmdb, 'search_series', title, '')
+            if not isinstance(hits, list):
+                raise _Unavailable('metadata unavailable')
+            candidates = {h['id']: h for h in hits if isinstance(h, dict)
+                          and type(h.get('id')) is int and h['id'] > 0
+                          and artwork.title_key(title) in
+                          {artwork.title_key(h.get('name')), artwork.title_key(h.get('original_name'))}}
+            if len(candidates) > 1:
+                self.counts['ambiguous'] += 1
+            hit = next(iter(candidates.values())) if len(candidates) == 1 else None
+            self.state.cache(key, hit, 30 * 86400 if hit else 86400)
+            return hit
+        except (ValueError, TimeoutError, OSError, TypeError, AttributeError):
+            return None
+
+    def _tvmaze_show(self, title, year):
+        key = json.dumps(['live-tvmaze-show-v2', artwork.title_key(title), year])
         found, value = self.state.cached(key)
         if found:
             self.counts['metadata_cache_hits'] += 1
@@ -267,18 +353,36 @@ class ArtworkEnricher:
                 if (detail.get('id') != identifier or artwork.title_key(detail.get('name')) != artwork.title_key(title)
                         or (year and str(detail.get('premiered') or '')[:4] != year)):
                     raise _Unavailable('metadata mismatch')
-                value = {'show': detail, 'episode': None}
-                if episode:
-                    season, number = episode
-                    ep = self._tvmaze_json(f'https://api.tvmaze.com/shows/{identifier}/episodebynumber?season={season}&number={number}')
-                    if (ep.get('season') != season or ep.get('number') != number
-                            or type(ep.get('id')) is not int or ep['id'] <= 0):
-                        raise _Unavailable('metadata mismatch')
-                    value['episode'] = ep
+                value = detail
             self.state.cache(key, value, 30 * 86400 if value else 86400)
             return value
         except (ValueError, TimeoutError, OSError, TypeError, AttributeError):
             return None
+
+    def _tvmaze_lookup(self, title, year, episode):
+        detail = self._tvmaze_show(title, '' if episode else year)
+        if not detail:
+            return None
+        if not episode:
+            return {'show': detail, 'episode': None}
+        season, number = episode
+        identifier = detail['id']
+        key = json.dumps(['live-tvmaze-episode-v2', identifier, season, number])
+        found, ep = self.state.cached(key)
+        if found:
+            self.counts['metadata_cache_hits'] += 1
+        else:
+            try:
+                ep = self._tvmaze_json(f'https://api.tvmaze.com/shows/{identifier}/episodebynumber?season={season}&number={number}')
+                if (ep.get('season') != season or ep.get('number') != number
+                        or type(ep.get('id')) is not int or ep['id'] <= 0):
+                    raise _Unavailable('metadata mismatch')
+                self.state.cache(key, ep, 30 * 86400)
+            except (ValueError, TimeoutError, OSError, TypeError, AttributeError):
+                return None
+        if not self._episode_year_matches(ep.get('airdate'), year):
+            return None
+        return {'show': detail, 'episode': ep}
 
     def _tvmaze_json(self, url):
         data = json.loads(self._api_transport(url, {}).body)
@@ -298,9 +402,9 @@ class ArtworkEnricher:
         title = programme.findtext('title', '')
         year = programme.findtext('date', '')[:4]
         year = year if re.fullmatch(r'\d{4}', year) else ''
-        ns = programme.findtext('episode-num[@system="xmltv_ns"]', '')
-        match = re.fullmatch(r'(\d+)\.(\d+)\.', ns)
-        episode = tuple(int(n) + 1 for n in match.groups()) if match else None
+        ns_values = [n.text for n in programme.findall('episode-num[@system="xmltv_ns"]')]
+        parsed = [parse_xmltv_ns(value) for value in ns_values]
+        episode = parsed[0] if parsed and parsed[0] is not None and all(p == parsed[0] for p in parsed) else None
         categories = {artwork.title_key(c.text) for c in programme.findall('category')}
         movie = bool(categories & {'movie', 'film', 'spielfilm'}) and not any(
             n.get('system') not in {'tmdb', 'tvmaze'} for n in programme.findall('episode-num'))
@@ -325,6 +429,32 @@ class ArtworkEnricher:
                       if n.get('system') in {'tmdb', 'tvmaze'}]
         for node in source_ids:
             clean.remove(node)
+        source_ns = clean.findall('episode-num[@system="xmltv_ns"]')
+        for node in source_ns:
+            clean.remove(node)
+        if episode:
+            ET.SubElement(clean, 'episode-num', {'system': 'xmltv_ns'}).text = f'{episode[0]-1}.{episode[1]-1}.'
+        elif source_ns:
+            # A malformed/conflicting source identity must not reach the old
+            # strict parser or accidentally qualify the event as a movie.
+            ET.SubElement(clean, 'episode-num', {'system': 'xmltv_ns'})
+        metadata = _Metadata(self, self.tmdb, year) if self.tmdb is not None else None
+        source_dates = None
+        if episode and self.tmdb is not None:
+            hit = self._tmdb_show(title)
+            series_year = str(hit.get('first_air_date') or '')[:4] if hit else ''
+            if hit and re.fullmatch(r'[0-9]{4}', series_year):
+                # Bridge only the existing series-premiere filter, using the
+                # actual matched show's year. _Metadata independently checks
+                # the original programme year against the episode air_date.
+                source_dates = clean.findall('date')
+                for node in source_dates:
+                    clean.remove(node)
+                ET.SubElement(clean, 'date').text = series_year
+            else:
+                if hit:
+                    self.counts['show_year_unavailable'] += 1
+                metadata = None
         feed = []
         for icon in clean.findall('icon'):
             clean.remove(icon)
@@ -333,8 +463,7 @@ class ArtworkEnricher:
             feed.append(record)
         tree.append(clean)
         # Calling aggregate also exercises existing movie/episode positive/negative caches.
-        result, _ = pipeline.aggregate([('bounded-event', tree)], _Cache(self),
-                                      _Metadata(self, self.tmdb) if self.tmdb is not None else None)
+        result, _ = pipeline.aggregate([('bounded-event', tree)], _Cache(self, year if episode else None), metadata)
         enriched = result.find('programme')
         matched = False
         tmdb_identity = enriched.findtext('episode-num[@system="tmdb"]', '')
@@ -374,6 +503,8 @@ class ArtworkEnricher:
                 for record in records:
                     if record['provider'] == 'tmdb':
                         record['evidence']['episode_id'] = detail.get('id')
+                        record['evidence']['episode_airdate'] = detail.get('air_date')
+                        record['evidence']['episode_year_validation'] = 'exact' if year else 'not_supplied'
                 for kind, field in (('poster', 'poster_path'), ('backdrop', 'backdrop_path')):
                     try:
                         url = artwork.image_url(series.get(field))
@@ -409,7 +540,9 @@ class ArtworkEnricher:
                     if isinstance(url, str):
                         records.append(self._record(enriched, kind, url, 'tvmaze', identifier,
                             {'title': 'unicode_normalized_exact', 'year': year or None,
-                             'episode': list(episode) if episode else None, 'episode_id': ep.get('id') if ep else None}))
+                             'episode': list(episode) if episode else None, 'episode_id': ep.get('id') if ep else None,
+                             'episode_airdate': ep.get('airdate') if ep else None,
+                             'episode_year_validation': ('exact' if year else 'not_supplied') if ep else None}))
         for icon in enriched.findall('icon'):
             enriched.remove(icon)
         records.extend(feed)
@@ -428,6 +561,13 @@ class ArtworkEnricher:
         for node in source_ids:
             if (node.get('system'), node.text) not in existing_ids:
                 enriched.append(node)
+        for node in enriched.findall('episode-num[@system="xmltv_ns"]'):
+            enriched.remove(node)
+        enriched.extend(source_ns)
+        if source_dates is not None:
+            for node in enriched.findall('date'):
+                enriched.remove(node)
+            enriched.extend(source_dates)
         return enriched, records
 
     def summary(self):
