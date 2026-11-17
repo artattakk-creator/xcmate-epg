@@ -1,158 +1,144 @@
-# Issue #4 – einmaliger privater XMLTV-Probelauf
+# Issue #4 – erster echter privater XMLTV-Probelauf
 
-## Tatsächliches Ergebnis: LIVE_INPUT_BLOCKED
+## Ergebnis am 17.11.2026: PRIVATE_EPG_CREATED
 
-Am 17.11.2026 wurden die drei aktivierten externen Feeds aus der vorhandenen privaten
-XCMate-Konfiguration ermittelt. Die Konfiguration wurde über den verbundenen Google-Drive-
-Zugang gezielt gelesen, kein vollständiges Kodi-Backup kopiert, kein Token gelesen.
-Die konkreten Adressen und die privaten Konfigurationsdateien liegen ausschließlich unter
-`work/private-live/` und sind von Git ausgeschlossen. Keine Feed-Adresse steht in diesem Bericht.
+Alle drei persönlich konfigurierten Quellen wurden einmal erfolgreich vollständig geladen.
+Der erste Export ist ein ausdrücklich begrenzter DACH-Senderausschnitt aus allen drei Quellen,
+ohne Artwork. Kein Demo-Fallback. Die Umgebung bestätigt alle sechs beantragten Domains mit
+`observations_current=true` und aktiv erzwungener Allowlist.
 
-Alle drei HTTPS-Abrufe scheitern bereits beim Proxy-Tunnelaufbau mit **403 Forbidden**.
-Dies ist keine HTTP-Antwort des jeweiligen Feed-Servers. Die verwaltete Umgebung meldet
-`network_policy.mode=restricted`, `state=enforced`, `observations_current=true`.
-Die beiden konfigurierten Feed-Hosts fehlen in der effektiven Domain-Allowlist.
-Ein Werkzeug zum Ändern/Beantragen der laufenden Netzwerkfreigaben ist nicht verfügbar.
-Die Proxyvorgaben und TLS-Prüfung wurden nicht umgangen oder abgeschaltet.
+| Quelle | HTTP | GZIP Byte | Entpackte Byte | Eingang Sender / Programme | Ausschnitt Sender / Programme |
+|---|---:|---:|---:|---:|---:|
+| s1 | 200 | 3.470.663 | 21.921.488 | 266 / 22.614 | 7 / 849 |
+| s2 | 200 | 3.721.683 | 19.372.206 | 144 / 18.503 | 6 / 944 |
+| s3 | 200 | 13.301.178 | 100.488.538 | 868 / 144.829 | 10 / 2.135 |
 
-| Nachweis | Tatsächlicher Stand |
-|---|---|
-| Konfigurierte externe Quellen | 3 |
-| Erfolgreich geladene echte Quellen | 0 |
-| Übernommene echte Sender / Programme / Bilder / Logos | 0 / 0 / 0 / 0 |
-| Gemessene Feed-Größen, Encoding, Zeitumfang | Nicht messbar: kein Quellenpayload empfangen |
-| Echte xcmate-epg.xml.gz / SHA256 | Nicht vorhanden / nicht vorhanden |
-| Bestätigte neue Provider-Zuordnungen | 0 |
-| TMDB | PENDING; kein Secret gelesen oder kopiert, kein API-Aufruf |
-| Privater Download | Kein Download einer nicht erzeugten Datei angeboten |
+Die zwei EPGShare-Abrufe lieferten mit dem Standard-Python-Client zunächst HTTP 403 und
+Cloudflare-Code 1010. Ein als `XCMateEPG/0.1 private-one-shot-preview` identifizierter Client
+erhielt jeweils HTTP 200. Keine Browseridentität, Zugangsdaten oder Proxyumgehung.
+Der private Importpfad sendet diese Kennung jetzt ebenfalls; Conditional-Header bleiben erhalten.
+Nur drei erfolgreiche Payloads wurden gespeichert; Wiederholungsprüfungen verwenden lokale Snapshots.
 
-Das Issue ist hinsichtlich echter EPG-Abnahme **nicht abgeschlossen**. Offline-Testdaten
-werden ausdrücklich nicht als echter Dateinachweis ausgegeben.
+## Artefakt und Integrität
 
-## Implementierter privater Ausführungspfad
+- `xcmate-epg.xml.gz`: **875.298 Byte**, 23 quellenqualifizierte Sendereinträge, 3.928 Programme.
+- Zeitumfang: **16.11.2026 05:00 UTC bis 24.11.2026 01:28 UTC**.
+- SHA256: `3edde025d368f3069b541545b688a088ce7942132bf00209cdc460c161833f8e`.
+- `manifest.json`: `PRIVATE_LIVE_PREVIEW_DO_NOT_PUBLISH`, identische SHA, Größe und Zählungen.
+- `xcmate-epg.xml.gz.sha256`: unabhängig gegen die GZIP-Datei geprüft.
+- Versionierte und aktuelle Datei sind bytegleich; GZIP, XML, Referenzen und Zeiten sind valide.
+- Alle 3.928 Tupel aus Sender-ID, Beginn, Ende und Titel stimmen mit den echten importierten
+  Ausschnitten überein. Keine unbekannten Programmreferenzen, Überlappungen oder Merge-Konflikte.
+- Am 17.11.2026 um 17:02 UTC hatten alle 23 Einträge ein aktuelles Programm.
+- Wiederholung: drei Snapshots `unchanged`, identische SHA und kein Manifest-Neuschreiben.
+- Ausfall aller drei lokalen Inputs: drei echte LastGood-Snapshots, identische SHA; dabei korrekt
+  null frisch erfolgreiche Quellen und drei Inputfehler. Danach Inputs wiederhergestellt.
+- Keine erneuten Feed-Downloads für Wiederholungs- und LastGood-Prüfungen.
 
-`python -m xcmate_epg.private_preview` ist von der bisherigen Demo-CLI getrennt:
+Aggregierte Belege: `docs/issue4-live-attempt.json`. Keine konkreten Feedadressen,
+Senderkataloge, Programmtitel oder persönlichen Provider-IDs in dieser Dokumentation.
 
-- Explizite Quellenkonfiguration zwingend; kein synthetischer Ersatz bei fehlenden Daten.
-- `sources[].path` für private lokale XML/XML.GZ-Dateien; `sources[].url` nur mit
-  `--authorize-network`, ausschließlich HTTPS ohne Zugangsdaten/Query/Fragment.
-- Ursprüngliche Grenzen: 32 MiB komprimiert **und** dekomprimiert sowie für den Gesamtoutput.
-  Übergröße führt zu `*_LIMIT_REQUIRES_SUBSET`, niemals zu unlimitierter Dekompression.
-  Vor Aufhebung einer Grenze ist ein separat geprüfter Streaming-/Subset-Import nötig.
-- Optional `channel_ids` pro Quelle: explizite Feed-IDs für einen Ausschnitt innerhalb der
-  Größenlimits. Keine automatische Gleichsetzung mit Provider-IDs; Identitäten bleiben
-  mit anonymen Quell-IDs qualifiziert. Bestätigte Provider-Abbildung bleibt separat privat.
-- Explizite, lokal geprüfte `approved_image_hosts` für vorhandene öffentliche HTTPS-Icons.
-  Keine signierten Querystrings, Zugangsdaten oder unbekannten Hosts. Icons mit zusätzlichen
-  Inhalten/Attributen werden abgewiesen; Attribution wird nicht heimlich entfernt.
-- ETag/Last-Modified, 304, Payload-SHA, persistente validierte Snapshots und quellenspezifisches
-  LastGood. Andere Inputs oder geänderte Policy dürfen keinen fremden Snapshot erben.
-- `minimum_sources` zählt verfügbare validierte Quellen einschließlich LastGood. Darunter
-  kein neuer Export; ein existierendes Manifest bleibt erhalten.
-- Private Verzeichnisse 0700, Dateien 0600, Git-Ignore-Prüfung bei Ausgabe im Repository.
-  Symlinks, Hardlinks und spezielle Dateien in der privaten Ablage werden abgewiesen.
-- Vollständiger validierter XMLTV-Export, deterministisches GZIP, SHA256, Manifest mit
-  `PRIVATE_LIVE_PREVIEW_DO_NOT_PUBLISH`, danach unabhängiger GZIP-/Parser-/Hash-Check.
-  Größen-/Inhaltsprüfungen liegen vor dem Manifest-Commit.
-- Qualitätsbericht enthält Zahlen und Zeitfenster, keine Inputadressen oder Programmtitel.
-  LastGood-Nutzung wird getrennt von frisch erfolgreichen Quellen gezählt.
+## Begrenzte Aufbereitung und Eingangsqualität
 
-## Sichere lokale Erzeugung nach Freigabe des Inputs
+Die normalen Parser-/Exportgrenzen bleiben bei 32 MiB. Ein separater privater One-shot-Helfer
+`work/private-live/subset.py` verarbeitet die Snapshots sequenziell: 64-KiB-Leseblöcke,
+maximal 128 MiB entpackte Daten, 1 MiB pro Datensatz, Tiefe 32, eine Million Kanal-/Programmdatensätze
+und 16 MiB pro Ausschnitt. Die dritte Quelle wurde tatsächlich bis zum GZIP-Ende gelesen;
+der Trailer diente nur als Größenhinweis. Keine unbegrenzte Dekompression und kein vollständiger
+XML-Baum. Die drei erzeugten Ausschnitte sind jeweils kleiner als 2 MiB.
 
-Voraussetzung: autorisierter persönlicher Rechner oder diese Umgebung mit gezielter Freigabe
-der zwei tatsächlichen Feed-Hosts in den Umgebungseinstellungen. Konkrete Namen ausschließlich
-aus der privaten Konfiguration übernehmen, keine allgemeinen Proxyumgehungen.
-Die Freigabe eines Feed-Hosts stellt keine Erlaubnis zur öffentlichen Weiterverbreitung dar.
+Alle Quellen sind UTF-8. s2 enthält ausschließlich `DOCTYPE tv SYSTEM "xmltv.dtd"`.
+Der private Helfer erkennt exakt diesen externen Deklarationsfall, lädt die DTD niemals und
+serialisiert einen DTD-freien Ausschnitt. Interne DTDs, Entity-Deklarationen und externe
+Entity-Auflösung bleiben gesperrt. Dies ist ein privates Aufbereitungsskript für diesen Lauf,
+kein allgemeiner Streaming-Produktivpfad. Der normale Parser weist DTDs weiterhin zurück.
 
-Python 3.11+, keine Zusatzpakete, keine kostenpflichtigen Dienste. Im Entwicklungscheckout:
+In der vollständigen Quelle s1 liegt ein Programm mit ungültiger Dauer außerhalb der ausgewählten
+Sender. Im Export sind sämtliche Zeiten und Dauern gültig. Alle drei vollständigen Quellen haben
+keine leeren Programmtitel und keine unbekannten Programm-Senderreferenzen.
 
-```sh
-mkdir -p work/private-live
-chmod 700 work/private-live
-```
+## Sender, Bilder und Logos
 
-Die eigene `xtreammate_epg_sources.json` lokal als `work/private-live/xcmate-sources.json`
-ablegen; keine Portale oder TMDB-Dateien kopieren. Einmalig die aktiven Quellen umwandeln:
+IDs bleiben mit s1/s2/s3 qualifiziert. 23 Einträge sind keine Behauptung 23 unterschiedlicher
+kanonischer Sender. Gleiche Namen zwischen Quellen begründen keine Provider-Aliase.
+`channel_map_confirmed=0`: die persönliche Provider-Zuordnung bleibt offen.
 
-```sh
-python3 - <<'PY'
-import json
-from pathlib import Path
-base = Path('work/private-live')
-xcmate = json.loads((base / 'xcmate-sources.json').read_text())
-active = [s for entry in xcmate.values() for s in entry.get('sources', [])
-          if s.get('enabled') and not s.get('local')]
-config = {'minimum_sources': 1, 'approved_image_hosts': [],
-          'sources': [{'id': f's{i}', 'url': s['uri'], 'priority': i}
-                      for i, s in enumerate(active, 1)]}
-path = base / 'config.json'
-path.write_text(json.dumps(config))
-path.chmod(0o600)
-PY
-python3 -m xcmate_epg.private_preview \
-  --config work/private-live/config.json \
-  --private-root work/private-live/run --authorize-network
-```
+Der erste Export ist bewusst ohne Artwork. Die ausgewählten Originaldatensätze enthalten
+11 Kanal-Icon-Verweise, 3.952 Programm-Icon-Verweise und 2.178 zusätzliche nichtstandardisierte
+`image`-Elemente. Sie verwenden zusätzliche, nicht freigegebene Hosts und teils HTTP.
+Keine weiteren Hosts wurden freigegeben, keine Bilder heruntergeladen oder auf TMDB umgebogen.
+13 Kanal-URLs und 91 Programm-URLs fehlen ebenfalls im Export, damit keine Quellen-/Metadatenadressen
+in die XMLTV gelangen. Originalattribute und alle ausgelassenen Elemente bleiben in privaten
+Snapshots und quellen-/sender-/zeitbezogenen Auslassungsprotokollen für Herkunft und Attribution
+erhalten. Dies ist keine Distributionsfreigabe.
 
-Bei gesperrtem Egress können auf dem autorisierten Rechner heruntergeladene echte
-XMLTV-Dateien privat übertragen werden. Die jeweilige Quelle in der privaten JSON-Datei
-als `{"id":"s1","path":"/absoluter/privater/pfad/feed.xml.gz","priority":1}` eintragen,
-`url` entfernen und `--authorize-network` weglassen. Keine vollständigen Kodi-Backups,
-keine Zugangsdaten und keine Rohprogramme in Issues/PRs/öffentliche Artefakte laden.
-Ein größerer Originalfeed benötigt zunächst einen sicher erzeugten echten Ausschnitt;
-`channel_ids` hebt das Dekompressionslimit nicht auf.
+`logos_present=0`, `programme_images_present=0`, `artwork_matched=0`, `artwork_status=PENDING`.
+Die Bindung der Eingangsverweise an Quelle und Datensatz wurde geprüft; Bildinhalt und
+Erreichbarkeit dieser zusätzlichen Hosts wurden nicht bestätigt.
 
-Erfolgreiche Ausgabe ausschließlich unter `work/private-live/run/`:
+Weitere Netzwerkprüfungen: TVmaze API HTTP 200, TMDB API ohne Authentifizierung HTTP 401,
+TMDB-CDN-Wurzel HTTP 404, TVmaze-CDN-Wurzel HTTP 301. Der letzte Redirect auf einen nicht
+freigegebenen Webhost wurde nicht verfolgt. Wurzelantworten sind keine Bilddateiprüfung.
+Kein TMDB-Secret gelesen, kopiert oder verwendet; kein authentifizierter Artwork-Aufruf.
 
-- `output/xcmate-epg.xml.gz`
-- `output/xcmate-epg.xml.gz.sha256`
-- `output/manifest.json`, unveränderliche Versionen unter `output/versions/`
-- `quality-report.json`, `state.sqlite` (privat, nicht übertragen nötig)
+## Private Ablage und Transfer
 
-Nach Erfolg erneut ausführen und Hash vergleichen; danach eine Quelle gezielt unerreichbar
-machen und im Qualitätsbericht `cache_status=lastgood` bei gleichem Ausgabestand prüfen.
-Diese Echtprüfungen wurden hier mangels Input noch nicht durchgeführt. LastGood und
-Unverändert-Verhalten sind ausschließlich offline mit Testfixtures abgesichert.
+Die Dateien liegen nur unter `/workspace/xcmate-epg/work/private-live/run/output/`:
 
-## Geschützter Transfer und persönliche Prüfung
+- `xcmate-epg.xml.gz`
+- `manifest.json`
+- `xcmate-epg.xml.gz.sha256`
+- unveränderliche Kopie unter `versions/<sha256>/`
 
-Diese Umgebung bietet aktuell keinen verifizierten privaten EPG-Downloadendpunkt für den
-Benutzer. Kein Webserver, keine Pages-Datei und kein öffentliches Actions-Artefakt wird erzeugt.
-Falls die Datei auf einem eigenen per SSH erreichbaren Rechner erzeugt wird, ausschließlich
-bestehendes authentifiziertes SSH/SFTP/SCP für die drei Ausgabedateien nutzen, z.B.:
+Verzeichnisse 0700, Dateien 0600; `work/` ist von Git ausgeschlossen. Rohquellen, Konfiguration,
+Senderinventare, Auslassungsprotokolle und Prüfhistorie liegen nur im privaten Arbeitsbaum.
+Keine dieser Dateien ist im Commit.
+
+Ein privater Drive-Zielordner wurde mit ausschließlich Eigentümerberechtigung und `shared=false`
+geprüft. Der Upload wurde jedoch von der automatischen Freigabeprüfung wegen fehlender
+expliziter Zustimmung zu diesem Ziel abgelehnt. Kein EPG-Payload wurde übertragen.
+Ein funktionierender privater Downloadendpunkt wird deshalb nicht behauptet; kein öffentlicher
+Ersatzendpunkt wurde erstellt. Ein neu angelegter privater Zielordner enthält keine EPG-Datei.
+
+Nach autorisiertem privatem Transfer die drei Artefakte und den Qualitätsbericht übernehmen,
+keine Konfiguration/Rohquellen. Auf dem Benutzerrechner im selben Verzeichnis prüfen:
 
 ```sh
-scp user@eigener-rechner:/privater/pfad/xcmate-epg/work/private-live/run/output/xcmate-epg.xml.gz .
-scp user@eigener-rechner:/privater/pfad/xcmate-epg/work/private-live/run/output/xcmate-epg.xml.gz.sha256 .
-scp user@eigener-rechner:/privater/pfad/xcmate-epg/work/private-live/run/output/manifest.json .
 sha256sum -c xcmate-epg.xml.gz.sha256
 gzip -t xcmate-epg.xml.gz
 ```
 
-Dies ist eine Anleitung für einen eigenen bereits autorisierten Rechner, kein behaupteter
-funktionierender Download aus dieser Codex-Umgebung. Eine spätere private Drive-Ablage müsste
-vor dem Upload auf ausschließlich persönliche Zugriffsrechte geprüft werden; hier kein Upload.
+Für bereits eingerichtetes authentifiziertes SSH/SFTP ist das lokale Quellverzeichnis oben
+angegeben; ein nicht eingerichteter Cloud-SSH-Download wird damit nicht behauptet.
+Ein privater Drive-Upload erfordert ausdrückliche Zielzustimmung und erneute Prüfung von
+Ordner- und Dateiberechtigungen auf ausschließlich Eigentümerzugriff. Keine Linkfreigabe.
 
-## TMDB und Kodi
+Lokale Wiederholung ohne Netzwerk:
 
-Kein Auslesen des bestehenden GitHub-Secrets nach Codex. Kein neuer Secret-führender
-PR-Workflow; ohne vertrauenswürdigen separat eingerichteten Ausführungspfad bleibt TMDB
-`PENDING`. Vorhandene erlaubte Feed-Bildlinks werden separat gezählt, nicht als TMDB-Treffer.
+```sh
+python3 -m xcmate_epg.private_preview \
+  --config work/private-live/subset-config.json \
+  --private-root work/private-live/run
+```
 
-Der gelesene Kodi-Quellstand `6e34671456495b2ce514721402b05236789382c2` unterstützt im EPG-Manager
-**Quellen hinzufügen → XMLTV-Datei** (`.xml`, `.gz`, `.xml.gz`), anschließend **Jetzt aktualisieren**
-und die manuelle Senderzuordnung. Referenzen: `epg_manager53.py`, `epg_sources.py`,
-`xmltv_stream.py` unter `src/plugin.video.xtreammate/resources/lib/` im Kodi-Repository.
-Diese Codebasis weist im addon.xml Version 0.1.29.92 aus; die konkrete ausgelieferte
-**0.1.29.97 wurde hier nicht binär oder auf Android verifiziert**. Der Agent-Schalter aus
-Kodi-Draft #486 ist weiterhin nur ein Entwurf. Quellequalifizierte IDs benötigen bestätigte
-manuelle Zuordnung im Client; bestehende Provider-Zuordnungen nicht überschreiben.
-Keine Behauptung sichtbarer BINGIE-Bilder oder funktionierender Pilot-Integration.
+## Kodi und Regressionen
 
-## Prüfungen und Release-Sperren
+Der zuvor geprüfte Kodi-Stand `6e34671456495b2ce514721402b05236789382c2` unterstützt im EPG-Manager
+**Quellen hinzufügen → XMLTV-Datei**, anschließend **Jetzt aktualisieren** und manuelle Zuordnung.
+Die ausgelieferte Version 0.1.29.97 wurde nicht auf Android verifiziert; sichtbare BINGIE-Bilder
+werden nicht behauptet. Keine Kodi-Datei oder Provider-Zuordnung geändert.
 
-46 lokale Unit-/Mocktests bestanden, davon die ursprünglichen 34 unverändert und zwölf neue
-Regressionen für privaten Import, Zählung, Rechte, Fehler, LastGood und Export-Rollback.
-Der vorhandene Bootstrap-Smoke bleibt ein synthetischer Offline-Nachweis.
-Kein Merge, kein Pages-Upload, keine echte öffentliche Ausgabe, kein Secret-Export,
-kein aktiver Tagesplan, keine Kodi-Änderungen und keine kostenpflichtigen Dienste.
+47 lokale Tests bestanden; die ursprünglichen 34 Tests sind unverändert. Der synthetische
+Bootstrap-Smoke bestand separat und zählt nicht als Live-Nachweis. Unabhängige Codeprüfung:
+keine handlungsrelevanten Befunde. Die Git-Ignore-Schutzprüfung bindet jetzt an das tatsächlich
+erkannte Repository, damit ein ungültiger verschachtelter `.git`-Marker keine Ignore-Regel des
+übergeordneten Repositories erbt. In dieser Umgebung enthalten `/tmp` und `/workspace` geschützte
+`.git`-Marker; die Tests verwenden deshalb ein ignoriertes privates Temp-Verzeichnis:
+
+```sh
+mkdir -p work/private-live/tmp
+TMPDIR="$PWD/work/private-live/tmp" python3 -m unittest discover -s tests -q
+```
+
+Kein Merge, kein Pages-Upload, keine öffentlichen Datenartefakte, kein täglicher Job,
+kein Live-Datenlauf in Actions, kein Secret-Export und keine kostenpflichtigen Dienste.

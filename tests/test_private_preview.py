@@ -83,6 +83,18 @@ class PrivatePreviewTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'NETWORK_NOT_AUTHORIZED'):
                 run_preview({'sources':[{'id':'s1','url':'https://feed.example.invalid/input'}]},Path(d)/'private')
 
+    def test_live_request_identifies_xcmate_client(self):
+        from unittest.mock import patch
+        from xcmate_epg.fetch import Response
+        with tempfile.TemporaryDirectory() as d:
+            config={'sources':[{'id':'s1','url':'https://feed.example.invalid/input'}], 'approved_image_hosts':['logos.example.invalid','images.example.invalid']}
+            def transport(url, headers):
+                self.assertEqual(headers.get('User-Agent'), 'XCMateEPG/0.1 private-one-shot-preview')
+                return Response(200, gzip.compress(XML), {})
+            with patch('xcmate_epg.private_preview.http_get',side_effect=transport):
+                report=run_preview(config,Path(d)/'private',authorize_network=True)
+            self.assertEqual(report['real_sources_successful'],1)
+
     def test_icon_attributes_cannot_bypass_secret_scan(self):
         with tempfile.TemporaryDirectory() as d:
             p,source,config=self.setup_case(d)
@@ -117,7 +129,7 @@ class PrivatePreviewTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             config={'sources':[{'id':'s1','url':'https://feed.example.invalid/input'}], 'approved_image_hosts':['logos.example.invalid','images.example.invalid']}
             def transport(url,headers):
-                if not headers: return Response(200,gzip.compress(XML),{'ETag':'revision-1','Last-Modified':'Tue, 17 Nov 2026 08:00:00 GMT'})
+                if 'If-None-Match' not in headers: return Response(200,gzip.compress(XML),{'ETag':'revision-1','Last-Modified':'Tue, 17 Nov 2026 08:00:00 GMT'})
                 self.assertEqual(headers['If-None-Match'],'revision-1')
                 return Response(304,b'',{})
             with patch('xcmate_epg.private_preview.http_get',side_effect=transport) as fetch:

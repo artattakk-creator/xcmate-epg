@@ -29,6 +29,10 @@ def private_root(path):
     path = path.resolve()
     for ancestor in (path, *path.parents):
         if (ancestor / '.git').exists():
+            repository = subprocess.run(['git', '-C', str(ancestor), 'rev-parse', '--show-toplevel'],
+                                        capture_output=True, text=True)
+            if repository.returncode or Path(repository.stdout.strip()).resolve() != ancestor:
+                raise ValueError('UNSAFE_PRIVATE_ROOT')
             result = subprocess.run(['git', '-C', str(ancestor), 'check-ignore', '-q', str(path)],
                                     capture_output=True)
             if result.returncode:
@@ -84,7 +88,7 @@ def _source(state, source, hosts, config_fingerprint):
     stats = {'id': key, 'http_status': None, 'cache_status': None}
     try:
         if 'url' in source:
-            headers = {}
+            headers = {'User-Agent': 'XCMateEPG/0.1 private-one-shot-preview'}
             if old and old['etag']: headers['If-None-Match'] = old['etag']
             if old and old['modified']: headers['If-Modified-Since'] = old['modified']
             response = http_get(source['url'], headers)
