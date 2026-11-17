@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import tempfile
 from xml.etree import ElementTree as ET
 from xml.parsers import expat
@@ -189,6 +190,29 @@ def _sha_file(path):
     return digest.hexdigest()
 
 
+def _verify_run_bundle(bundle,hashes,memory_check):
+    """Reused immutable names are untrusted until every member is verified."""
+    try:
+        if not stat.S_ISDIR(bundle.lstat().st_mode): raise ValueError('INVALID_RUN_BUNDLE')
+        pending=[bundle]; seen=set()
+        while pending:
+            directory=pending.pop()
+            for member in directory.iterdir():
+                memory_check()
+                info=member.lstat()
+                if stat.S_ISDIR(info.st_mode):
+                    pending.append(member)
+                elif stat.S_ISREG(info.st_mode) and info.st_nlink==1:
+                    relative=str(member.relative_to(bundle))
+                    if relative not in hashes or _sha_file(member)!=hashes[relative]:
+                        raise ValueError('INVALID_RUN_BUNDLE')
+                    seen.add(relative)
+                else: raise ValueError('INVALID_RUN_BUNDLE')
+        if seen!=hashes.keys(): raise ValueError('INVALID_RUN_BUNDLE')
+    except OSError:
+        raise ValueError('INVALID_RUN_BUNDLE') from None
+
+
 def publish_run(stage,root,*,memory_check=lambda:None):
     """Commit a complete immutable run, then update recoverable convenience paths.
 
@@ -203,8 +227,10 @@ def publish_run(stage,root,*,memory_check=lambda:None):
     identity=hashlib.sha256(json.dumps(hashes,sort_keys=True).encode()).hexdigest()
     bundle=root/'runs'/identity
     bundle.parent.mkdir(mode=0o700,exist_ok=True)
-    created=not bundle.exists()
+    if not stat.S_ISDIR(bundle.parent.lstat().st_mode): raise ValueError('INVALID_RUN_BUNDLE')
+    created=not bundle.exists() and not bundle.is_symlink()
     if created: os.replace(stage,bundle)
+    else: _verify_run_bundle(bundle,hashes,memory_check)
     manifest={'schema_version':1,'generation':identity,'directory':'runs/'+identity,
               'files':hashes,'quality_report':'runs/'+identity+'/quality-report.json'}
     backup=Path(tempfile.mkdtemp(prefix='.run-pending-rollback-',dir=root))

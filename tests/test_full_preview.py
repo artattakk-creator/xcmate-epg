@@ -187,3 +187,27 @@ class ReviewRegressions(unittest.TestCase):
                 self.assertEqual(envelope['coverage_kind'],'time_envelope_only')
                 self.assertIsNone(envelope['missing_programme_count'])
                 self.assertFalse(envelope['internal_gaps_evaluated'])
+
+    def test_reused_bundle_corruption_or_missing_member_fails_before_current_updates(self):
+        for damage in ('corrupt','missing'):
+            for remove_alias in (False,True):
+                with self.subTest(damage=damage,remove_alias=remove_alias),tempfile.TemporaryDirectory() as d:
+                    root,source,config=FullPreviewTests().make(d); private=root/'private'
+                    config['horizon']={'reference_time':'2026-11-17T08:00:00+00:00'}
+                    run_full(config,private); run_full(config,private)
+                    committed=(private/'run-manifest.json').read_bytes()
+                    bundle=private/json.loads(committed)['directory']
+                    archive=bundle/'full/xcmate-epg.xml.gz'
+                    if damage=='corrupt': archive.write_bytes(b'corrupt')
+                    else: archive.unlink()
+                    if remove_alias: (private/'full/xcmate-epg.xml.gz').unlink()
+                    tracked=['full/manifest.json','full/xcmate-epg.xml.gz','device/manifest.json',
+                             'device/xcmate-epg.xml.gz','quality-report.json','source-media.jsonl',
+                             'artwork-metadata.jsonl','mapping-review.json','run-manifest.json']
+                    before={name:(private/name).read_bytes() if (private/name).exists() else None for name in tracked}
+                    with self.assertRaisesRegex(ValueError,'INVALID_RUN_BUNDLE'):
+                        run_full(config,private)
+                    for name,payload in before.items():
+                        self.assertEqual((private/name).read_bytes() if (private/name).exists() else None,payload,name)
+                    self.assertEqual((private/'run-manifest.json').read_bytes(),committed)
+                    self.assertFalse(list(private.glob('.*pending*')))

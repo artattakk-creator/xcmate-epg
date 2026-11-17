@@ -76,3 +76,34 @@ class FullExportTests(unittest.TestCase):
 
 
 if __name__=='__main__': unittest.main()
+
+class BundleReuseTests(unittest.TestCase):
+    def test_reused_bundle_rejects_linked_or_nonregular_members_and_extra_files(self):
+        import os
+        from xcmate_epg.full_export import publish_run
+        for damage in ('symlink','hardlink','directory','extra','directory-symlink'):
+            with self.subTest(damage=damage),tempfile.TemporaryDirectory() as d:
+                root=Path(d); private=root/'out'; private.mkdir()
+                def stage(name):
+                    path=root/name; (path/'full').mkdir(parents=True)
+                    (path/'full/payload').write_bytes(b'fixture')
+                    (path/'quality-report.json').write_bytes(b'{}')
+                    return path
+                publish_run(stage('first'),private)
+                committed=(private/'run-manifest.json').read_bytes()
+                bundle=private/json.loads(committed)['directory']; member=bundle/'full/payload'
+                external=root/'external'; external.write_bytes(b'fixture')
+                if damage=='extra': (bundle/'unexpected').write_bytes(b'extra')
+                elif damage=='directory-symlink':
+                    member.unlink(); member.parent.rmdir()
+                    outside=root/'outside'; outside.mkdir(); (outside/'payload').write_bytes(b'fixture')
+                    (bundle/'full').symlink_to(outside,target_is_directory=True)
+                else:
+                    member.unlink()
+                    if damage=='symlink': member.symlink_to(external)
+                    elif damage=='hardlink': os.link(external,member)
+                    else: member.mkdir()
+                with self.assertRaisesRegex(ValueError,'INVALID_RUN_BUNDLE'):
+                    publish_run(stage('replay'),private)
+                self.assertEqual((private/'run-manifest.json').read_bytes(),committed)
+                self.assertEqual((private/'full/payload').read_bytes(),b'fixture')
