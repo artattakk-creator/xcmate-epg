@@ -24,7 +24,7 @@ def _copy_atomic(source,target):
         if os.path.exists(name): os.unlink(name)
 
 
-def verify_archive(path, *, image_hosts=None, max_xml_bytes=256*1024*1024, allow_empty=False):
+def verify_archive(path, *, image_hosts=None, max_xml_bytes=256*1024*1024, allow_empty=False,memory_check=lambda:None):
     """Independent gzip/Expat verifier: no XML tree, no entity expansion."""
     known=set(); counts={'channels':0,'programmes':0}; depth=0; title=False; has_title=False
     expanded=0; in_programme=False
@@ -59,6 +59,7 @@ def verify_archive(path, *, image_hosts=None, max_xml_bytes=256*1024*1024, allow
     parser.StartDoctypeDeclHandler=reject; parser.EntityDeclHandler=reject; parser.ExternalEntityRefHandler=reject
     with gzip.open(path,'rb') as stream:
         while True:
+            memory_check()
             chunk=stream.read(65536)
             if not chunk: break
             expanded+=len(chunk)
@@ -80,10 +81,11 @@ class _CompressedSink:
 
 def publish_stream(channels,programmes,directory,*,status='PARTIAL_COVERAGE',view='full',
                    image_hosts=None,max_xml_bytes=256*1024*1024,max_gzip_bytes=64*1024*1024,
-                   forbidden_values=()):
+                   forbidden_values=(),memory_check=lambda:None):
     if status not in {'PRIVATE_FULL_EPG_CREATED','PARTIAL_COVERAGE','ARTWORK_BLOCKED','SOURCE_BLOCKED'}:
         raise ValueError('INVALID_FULL_EXPORT_STATUS')
     if view not in {'full','device'}: raise ValueError('INVALID_EXPORT_VIEW')
+    memory_check()
     directory=Path(directory); directory.mkdir(parents=True,exist_ok=True,mode=0o700)
     directory.chmod(0o700)
     if directory.is_symlink(): raise ValueError('UNSAFE_EXPORT_DIRECTORY')
@@ -91,6 +93,7 @@ def publish_stream(channels,programmes,directory,*,status='PARTIAL_COVERAGE',vie
     archive=stage/'xcmate-epg.xml.gz'; known=set(); expected={'channels':0,'programmes':0}; xml_size=0
     forbidden=[value.encode() if isinstance(value,str) else value for value in forbidden_values if value]
     def validate_node(node):
+        memory_check()
         for icon in node.iter('icon'):
             if set(icon.attrib)-{'src','width','height'} or len(icon) or (icon.text or '').strip():
                 raise ValueError('INVALID_EXPORTED_ICON')
@@ -129,9 +132,10 @@ def publish_stream(channels,programmes,directory,*,status='PARTIAL_COVERAGE',vie
                 write(b'</tv>\n')
             raw.flush(); os.fsync(raw.fileno())
         archive.chmod(0o600)
-        checked=verify_archive(archive,image_hosts=image_hosts,max_xml_bytes=max_xml_bytes,allow_empty=view=='device')
+        checked=verify_archive(archive,image_hosts=image_hosts,max_xml_bytes=max_xml_bytes,allow_empty=view=='device',memory_check=memory_check)
         if any(checked[key]!=value for key,value in expected.items()) or checked['xml_bytes']!=xml_size:
             raise ValueError('EXPORT_COUNT_MISMATCH')
+        memory_check()
         digest=hashlib.sha256()
         with archive.open('rb') as stream:
             for chunk in iter(lambda:stream.read(65536),b''): digest.update(chunk)
@@ -183,3 +187,54 @@ def _sha_file(path):
     with Path(path).open('rb') as stream:
         for chunk in iter(lambda:stream.read(65536),b''): digest.update(chunk)
     return digest.hexdigest()
+
+
+def publish_run(stage,root,*,memory_check=lambda:None):
+    """Commit a complete immutable run, then update recoverable convenience paths.
+
+    Readers needing crash-consistent multi-file snapshots use run-manifest.json.
+    Handled failures restore all previous convenience files from disk backups.
+    No feed payload is retained in memory or linked through symlinks/hardlinks.
+    """
+    stage=Path(stage); root=Path(root); memory_check()
+    files=sorted(p.relative_to(stage) for p in stage.rglob('*') if p.is_file())
+    hashes={str(p):_sha_file(stage/p) for p in files}
+    memory_check()
+    identity=hashlib.sha256(json.dumps(hashes,sort_keys=True).encode()).hexdigest()
+    bundle=root/'runs'/identity
+    bundle.parent.mkdir(mode=0o700,exist_ok=True)
+    created=not bundle.exists()
+    if created: os.replace(stage,bundle)
+    manifest={'schema_version':1,'generation':identity,'directory':'runs/'+identity,
+              'files':hashes,'quality_report':'runs/'+identity+'/quality-report.json'}
+    backup=Path(tempfile.mkdtemp(prefix='.run-pending-rollback-',dir=root))
+    changed=[]
+    try:
+        # Immutable per-view generations can be safely retained even on failure.
+        for relative in files:
+            memory_check()
+            source=bundle/relative; target=root/relative
+            if target.is_file() and _sha_file(target)==hashes[str(relative)]: continue
+            target.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
+            saved=backup/relative
+            existed=target.exists()
+            if existed:
+                saved.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
+                _copy_atomic(target,saved)
+            changed.append((target,saved,existed))
+            _copy_atomic(source,target)
+        memory_check()
+        committed=(json.dumps(manifest,sort_keys=True,indent=2)+'\n').encode()
+        current=root/'run-manifest.json'
+        previous=current.read_bytes() if current.exists() else None
+        memory_check()
+        if previous!=committed:
+            atomic(current,committed)
+    except BaseException:
+        for target,saved,existed in reversed(changed):
+            if existed: _copy_atomic(saved,target)
+            else: target.unlink(missing_ok=True)
+        if created: shutil.rmtree(bundle)
+        raise
+    finally:
+        shutil.rmtree(backup)

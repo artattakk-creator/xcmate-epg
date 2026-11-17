@@ -42,6 +42,12 @@ class SourceError(ValueError):
     """A sanitized structural/source failure, never an input address."""
 
 
+def memory_guard(limits):
+    """Enforce the configured process peak budget throughout import and export."""
+    if resource.getrusage(resource.RUSAGE_SELF).ru_maxrss*1024>limits.max_memory_bytes:
+        raise SourceError('PROCESS_MEMORY_LIMIT')
+
+
 def file_sha(path, limit):
     digest=hashlib.sha256(); size=0
     with Path(path).open('rb') as stream:
@@ -82,6 +88,7 @@ class StreamStore:
     def import_source(self, identifier, path, priority=100, *, identity=None):
         if not re.fullmatch(r'[A-Za-z0-9_-]+',identifier): raise SourceError('INVALID_SOURCE_ID')
         if type(priority) is not int: raise SourceError('INVALID_SOURCE_PRIORITY')
+        memory_guard(self.limits)
         path=Path(path)
         fingerprint=hashlib.sha256(json.dumps([identity or str(path.absolute()),asdict(self.limits)],sort_keys=True).encode()).hexdigest()
         old=self.db.execute('SELECT * FROM full_sources WHERE id=?',(identifier,)).fetchone()
@@ -115,8 +122,7 @@ class StreamStore:
         earliest=None; latest=None; serialized=0
         def guard():
             if time.monotonic()-started>limits.max_seconds: raise SourceError('SOURCE_TIME_LIMIT')
-            if resource.getrusage(resource.RUSAGE_SELF).ru_maxrss*1024>limits.max_memory_bytes:
-                raise SourceError('PROCESS_MEMORY_LIMIT')
+            memory_guard(limits)
         def reject(*args): raise SourceError('UNSAFE_DTD_OR_ENTITY')
         def declaration(version,encoding,standalone):
             if encoding and encoding.lower().replace('-','')!='utf8': raise SourceError('ENCODING_NOT_UTF8')
@@ -242,6 +248,7 @@ class StreamStore:
         cursor=self.db.execute('''SELECT c.*,s.priority FROM full_channels c JOIN full_sources s
             ON c.source=s.id AND c.generation=s.generation ORDER BY c.qualified_id''')
         for row in cursor:
+            memory_guard(self.limits)
             yield {'qualified_id':row['qualified_id'],'name':row['name'],'source':row['source'],
                    'priority':row['priority'],'element':ET.fromstring(row['payload'])}
 
@@ -249,5 +256,6 @@ class StreamStore:
         cursor=self.db.execute('''SELECT p.*,s.priority FROM full_programmes p JOIN full_sources s
             ON p.source=s.id AND p.generation=s.generation ORDER BY p.qualified_id,p.start,p.sequence''')
         for row in cursor:
+            memory_guard(self.limits)
             yield {'source':row['source'],'qualified_id':row['qualified_id'],'start':row['start'],
                    'stop':row['stop'],'fingerprint':row['fingerprint'],'element':ET.fromstring(row['payload'])}
