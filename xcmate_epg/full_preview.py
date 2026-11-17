@@ -117,9 +117,7 @@ def _run(config,root,limits,metadata,artwork_config,authorize_network):
             except (SourceError,ValueError,OSError):
                 reports.append({'id':source['id'],'successful':False,'cache_status':'missing','error':'SOURCE_UNAVAILABLE_OR_QUARANTINED'})
         # A run is complete only for its configured sources, never leftover database rows.
-        with spool.db:
-            placeholders=','.join('?' for _ in config['sources'])
-            spool.db.execute(f'DELETE FROM full_sources WHERE id NOT IN ({placeholders})',[s['id'] for s in config['sources']])
+        spool.set_active_sources(s['id'] for s in config['sources'])
         if any(not r['successful'] for r in reports):
             result={'status':'SOURCE_BLOCKED','status_flags':['SOURCE_BLOCKED'],'sources':reports,
                     'real_sources_successful':sum(r['successful'] for r in reports),'previous_export_retained':(root/'full/manifest.json').exists()}

@@ -52,6 +52,58 @@ class FullPreviewTests(unittest.TestCase):
             self.assertEqual(archive.read_bytes(),before)
             self.assertEqual(fallback['sources'][0]['cache_status'],'lastgood')
 
+    def test_removed_source_retains_cache_and_rejoins_without_stale_events(self):
+        import gzip
+        import sqlite3
+        for changed in (False, True):
+            with self.subTest(changed=changed), tempfile.TemporaryDirectory() as d:
+                root,source,config=self.make(d)
+                b=root/'b.xml'; b.write_bytes(XML)
+                config['sources'].append({'id':'b','path':str(b)})
+                all_sources=list(config['sources']); private=root/'private'
+                self.assertEqual(run_full(config,private)['full']['programmes'],2)
+                config['sources']=[all_sources[1]]
+                self.assertEqual(run_full(config,private)['full']['programmes'],1)
+                with sqlite3.connect(private/'stream.sqlite') as db:
+                    self.assertIsNotNone(db.execute('SELECT sha FROM full_sources WHERE id="s1"').fetchone())
+                    self.assertEqual(db.execute('SELECT count(*) FROM full_programmes WHERE source="s1"').fetchone()[0],1)
+                if changed: source.write_bytes(XML.replace(b'Fixture</title>',b'Restored</title>'))
+                config['sources']=all_sources
+                report=run_full(config,private)
+                self.assertEqual(report['full']['programmes'],2)
+                self.assertEqual(report['sources'][0]['cache_status'],'changed' if changed else 'unchanged')
+                xml=gzip.decompress((private/'full/xcmate-epg.xml.gz').read_bytes())
+                self.assertEqual(xml.count(b'Restored</title>'),int(changed))
+                config['sources']=[all_sources[1]]; run_full(config,private)
+                before=(private/'full/xcmate-epg.xml.gz').read_bytes()
+                source.write_bytes(b'<tv>broken')
+                config['sources']=all_sources
+                blocked=run_full(config,private)
+                self.assertEqual(blocked['status'],'SOURCE_BLOCKED')
+                self.assertEqual(blocked['sources'][0]['cache_status'],'lastgood')
+                self.assertEqual((private/'full/xcmate-epg.xml.gz').read_bytes(),before)
+
+    def test_header_only_images_cannot_satisfy_full_success_gates(self):
+        from xcmate_epg.live_artwork import ArtworkEnricher
+        from xcmate_epg.fetch import Response
+        from xcmate_epg.state import State
+        from test_live_artwork import MovieClient
+        with tempfile.TemporaryDirectory() as d:
+            root,source,config=self.make(d)
+            source.write_bytes(XML.replace(b'Fixture</title>',b'Example</title>').replace(
+                b'<category>News</category>',b'<category>movie</category><date>2020</date>'))
+            config['mapping']={'catalog':[{'provider_id':'fixture','name':'Fixture'}],'catalog_complete':True,
+                'confirmations':[{'provider_id':'fixture','qualified_id':'s1:one','evidence':'synthetic explicit'}]}
+            config['artwork']={'confirmed_source_logos':[{'qualified_id':'s1:one',
+                'url':'https://image.tmdb.org/logo.png','evidence':'synthetic explicit','rights_reviewed':True}]}
+            with State(root/'art.sqlite') as state:
+                adapter=ArtworkEnricher(state,{'request_interval':0},tmdb=MovieClient(),transport=lambda *args:
+                    Response(200,b'\x89PNG\r\n\x1a\n',{'Content-Type':'image/png'}))
+                report=run_full(config,root/'private',metadata=adapter)
+            self.assertNotEqual(report['status'],'PRIVATE_FULL_EPG_CREATED')
+            self.assertIn('ARTWORK_BLOCKED',report['status_flags'])
+            self.assertEqual(adapter.summary()['verified_images'],0)
+
     def test_horizon_counts_and_source_addresses_do_not_leak(self):
         with tempfile.TemporaryDirectory() as d:
             p,source,config=self.make(d)

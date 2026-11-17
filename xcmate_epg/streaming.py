@@ -71,7 +71,8 @@ class StreamStore:
         PRAGMA temp_store=FILE;
         CREATE TABLE IF NOT EXISTS full_sources(
           id TEXT PRIMARY KEY,generation INTEGER NOT NULL,sha TEXT NOT NULL,
-          fingerprint TEXT NOT NULL,priority INTEGER NOT NULL,report TEXT NOT NULL);
+          fingerprint TEXT NOT NULL,priority INTEGER NOT NULL,report TEXT NOT NULL,
+          active INTEGER NOT NULL DEFAULT 1);
         CREATE TABLE IF NOT EXISTS full_channels(
           source TEXT,generation INTEGER,raw_id TEXT,qualified_id TEXT,name TEXT,payload BLOB,
           PRIMARY KEY(source,generation,raw_id));
@@ -81,6 +82,19 @@ class StreamStore:
           PRIMARY KEY(source,generation,fingerprint));
         CREATE INDEX IF NOT EXISTS full_event_order ON full_programmes(source,generation,qualified_id,start,sequence);
         ''')
+
+        # Upgrade existing V2 spools without discarding validated inactive caches.
+        columns={row['name'] for row in self.db.execute('PRAGMA table_info(full_sources)')}
+        if 'active' not in columns:
+            with self.db:
+                self.db.execute('ALTER TABLE full_sources ADD COLUMN active INTEGER NOT NULL DEFAULT 1')
+
+    def set_active_sources(self, identifiers):
+        """Scope output views while retaining source identity, reports and LastGood."""
+        identifiers=list(identifiers)
+        with self.db:
+            self.db.execute('UPDATE full_sources SET active=0')
+            self.db.executemany('UPDATE full_sources SET active=1 WHERE id=?',[(v,) for v in identifiers])
 
     def __enter__(self): return self
     def __exit__(self,*args): self.db.close()
@@ -96,13 +110,18 @@ class StreamStore:
             sha,size=file_sha(path,self.limits.max_compressed_bytes)
             if old and old['fingerprint']==fingerprint and old['sha']==sha:
                 # Priority is an output policy, not a reason to reparse an identical source.
-                with self.db: self.db.execute('UPDATE full_sources SET priority=? WHERE id=?',(priority,identifier))
+                with self.db: self.db.execute('UPDATE full_sources SET priority=?,active=1 WHERE id=?',(priority,identifier))
                 return dict(json.loads(old['report']),cache_status='unchanged',successful=True)
-            generation=old['generation']+1 if old else 1
+            # Old V2 pruning could leave orphan rows, even without source metadata.
+            generation=1+max(self.db.execute('''SELECT COALESCE(MAX(generation),0) FROM (
+                SELECT generation FROM full_sources WHERE id=? UNION ALL
+                SELECT generation FROM full_channels WHERE source=? UNION ALL
+                SELECT generation FROM full_programmes WHERE source=?)''',
+                (identifier,identifier,identifier)).fetchone()[0],0)
             with self.db:
                 report=self._parse(identifier,generation,path,size)
                 report.update(id=identifier,sha256=sha,cache_status='changed',successful=True)
-                self.db.execute('INSERT OR REPLACE INTO full_sources VALUES(?,?,?,?,?,?)',
+                self.db.execute('INSERT OR REPLACE INTO full_sources(id,generation,sha,fingerprint,priority,report) VALUES(?,?,?,?,?,?)',
                                 (identifier,generation,sha,fingerprint,priority,json.dumps(report)))
                 self.db.execute('DELETE FROM full_channels WHERE source=? AND generation!=?',(identifier,generation))
                 self.db.execute('DELETE FROM full_programmes WHERE source=? AND generation!=?',(identifier,generation))
@@ -238,15 +257,16 @@ class StreamStore:
         report['time_range']={'start':datetime.fromtimestamp(bounds[0],timezone.utc).isoformat(),'stop':datetime.fromtimestamp(bounds[1],timezone.utc).isoformat()} if bounds[0] is not None else None
         report['elapsed_seconds']=round(time.monotonic()-started,3)
         report['peak_process_rss_bytes']=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss*1024
-        assert report['input_programmes']==report['valid_programmes']+report['invalid_programmes']+report['exact_duplicates']
+        if report['input_programmes']!=report['valid_programmes']+report['invalid_programmes']+report['exact_duplicates']:
+            raise SourceError('PROGRAMME_ACCOUNTING_MISMATCH')
         return report
 
     def counts(self):
-        return {name:self.db.execute(f'SELECT COUNT(*) FROM full_{name} x JOIN full_sources s ON x.source=s.id AND x.generation=s.generation').fetchone()[0] for name in ('channels','programmes')}
+        return {name:self.db.execute(f'SELECT COUNT(*) FROM full_{name} x JOIN full_sources s ON x.source=s.id AND x.generation=s.generation WHERE s.active=1').fetchone()[0] for name in ('channels','programmes')}
 
     def iter_channels(self):
         cursor=self.db.execute('''SELECT c.*,s.priority FROM full_channels c JOIN full_sources s
-            ON c.source=s.id AND c.generation=s.generation ORDER BY c.qualified_id''')
+            ON c.source=s.id AND c.generation=s.generation WHERE s.active=1 ORDER BY c.qualified_id''')
         for row in cursor:
             memory_guard(self.limits)
             yield {'qualified_id':row['qualified_id'],'name':row['name'],'source':row['source'],
@@ -254,7 +274,7 @@ class StreamStore:
 
     def iter_programmes(self):
         cursor=self.db.execute('''SELECT p.*,s.priority FROM full_programmes p JOIN full_sources s
-            ON p.source=s.id AND p.generation=s.generation ORDER BY p.qualified_id,p.start,p.sequence''')
+            ON p.source=s.id AND p.generation=s.generation WHERE s.active=1 ORDER BY p.qualified_id,p.start,p.sequence''')
         for row in cursor:
             memory_guard(self.limits)
             yield {'source':row['source'],'qualified_id':row['qualified_id'],'start':row['start'],

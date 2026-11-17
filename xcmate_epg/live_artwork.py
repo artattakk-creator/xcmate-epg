@@ -15,6 +15,7 @@ from xml.etree import ElementTree as ET
 
 from . import artwork, pipeline
 from .fetch import http_get
+from .image_validation import validate_image
 from .xmltv import IMAGE_HOSTS, public_image
 
 
@@ -248,7 +249,7 @@ class ArtworkEnricher:
                 raise ValueError()
         except (ValueError, TypeError, AttributeError):
             return dict(failure, error='image_policy')
-        key = json.dumps(['verified-image-v1', url])
+        key = json.dumps(['verified-image-v2-structure', url])
         found, result = self.state.cached(key)
         if found:
             self.counts['image_cache_hits'] += 1
@@ -267,14 +268,10 @@ class ArtworkEnricher:
             transient = response.status in (401, 403, 429) or response.status >= 500
             mime = next((v for k, v in response.headers.items() if k.lower() == 'content-type'), '').split(';')[0].strip().lower()
             body = response.body
-            signatures = {'image/png': lambda b: b.startswith(b'\x89PNG\r\n\x1a\n'),
-                          'image/jpeg': lambda b: b.startswith(b'\xff\xd8\xff'),
-                          'image/webp': lambda b: b.startswith(b'RIFF') and b[8:12] == b'WEBP'}
             if (any(k.lower() == 'location' for k in response.headers)
-                    or getattr(response, 'url', url) != url
-                    or response.status != 200 or not isinstance(body, bytes) or len(body) > 8 * 1024 * 1024
-                    or mime not in signatures or not signatures[mime](body)):
+                    or getattr(response, 'url', url) != url or response.status != 200):
                 raise ValueError()
+            validate_image(body, mime)
             result = {'verified': True, 'sha256': hashlib.sha256(body).hexdigest(),
                       'size_bytes': len(body), 'mime_type': mime}
             self.counts['image_successes'] += 1
@@ -512,7 +509,9 @@ class ArtworkEnricher:
                         continue
                     if url:
                         records.append(self._record(enriched, kind, url, 'tmdb', identifier,
-                            {'title': 'unicode_normalized_exact', 'year': year, 'episode': list(episode)}))
+                            {'title': 'unicode_normalized_exact', 'year': year, 'episode': list(episode),
+                             'episode_id': detail.get('id'), 'episode_airdate': detail.get('air_date'),
+                             'episode_year_validation': 'exact' if year else 'not_supplied'}))
         if not matched and show and self.authorize_tvmaze:
             value = self._tvmaze_lookup(title, year, episode)
             if value:

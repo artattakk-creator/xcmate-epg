@@ -91,6 +91,40 @@ class StreamingTests(unittest.TestCase):
                 self.assertEqual(store.import_source('a0',feed)['cache_status'],'lastgood')
                 self.assertEqual(store.counts()['programmes'],10)
 
+    def test_legacy_schema_orphan_generations_cannot_collide_on_restore(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d); feed=root/'feed.xml'; feed.write_bytes(document(EVENT))
+            database=root/'store.sqlite'
+            with StreamStore(database) as store:
+                store.import_source('a',feed)
+                # Reproduce an old V2 source prune with surviving generation rows.
+                with store.db:
+                    store.db.execute('DELETE FROM full_sources WHERE id="a"')
+                    store.db.execute('UPDATE full_channels SET generation=9')
+                    store.db.execute('UPDATE full_programmes SET generation=9')
+            with sqlite3.connect(database) as db:
+                columns=[r[1] for r in db.execute('PRAGMA table_info(full_sources)')]
+                if 'active' in columns: db.execute('ALTER TABLE full_sources DROP COLUMN active')
+            feed.write_bytes(document(EVENT.replace(b'Fixture</title>',b'Restored</title>')))
+            with StreamStore(database) as store:
+                report=store.import_source('a',feed)
+                self.assertTrue(report['successful'])
+                self.assertEqual(store.counts(),{'channels':1,'programmes':1})
+                self.assertGreater(store.db.execute('SELECT generation FROM full_sources').fetchone()[0],9)
+                self.assertEqual(next(store.iter_programmes())['element'].findtext('title'),'Restored')
+
+    def test_accounting_mismatch_is_a_sanitized_error_even_with_assertions_disabled(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d); feed=root/'feed.xml'; feed.write_bytes(document(EVENT))
+            with StreamStore(root/'store.sqlite') as store:
+                store.import_source('a',feed)
+                feed.write_bytes(document(EVENT.replace(b'Fixture</title>',b'Changed</title>')))
+                # Force the old generation collision directly to exercise the guard.
+                with self.assertRaisesRegex(SourceError,'^PROGRAMME_ACCOUNTING_MISMATCH$'),store.db:
+                    store._parse('a',1,feed,feed.stat().st_size)
+                self.assertEqual(store.counts()['programmes'],1)
+
     def test_dst_and_zero_duration(self):
         with tempfile.TemporaryDirectory() as d:
             p=Path(d); feed=p/'input.xml'

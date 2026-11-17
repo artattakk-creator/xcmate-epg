@@ -9,7 +9,7 @@ from xcmate_epg.fetch import Response
 from xcmate_epg.state import State
 from xcmate_epg.live_artwork import ArtworkEnricher
 
-PNG = b'\x89PNG\r\n\x1a\n' + b'synthetic'
+from image_fixtures import PNG, JPEG, PROGRESSIVE_JPEG, WEBP, LOSSLESS_WEBP, png
 
 
 def event(episode=False, year='2020', category='movie'):
@@ -197,7 +197,10 @@ class LiveArtworkTests(unittest.TestCase):
         self.assertEqual(result.findtext('title[@lang="en"]'),'Original')
         self.assertEqual(result.findtext('star-rating/value'),'8/10')
         self.assertEqual({r['type'] for r in records},{'poster','backdrop','episode_still'})
-        self.assertEqual(next(r for r in records if r['type']=='episode_still')['evidence']['episode_id'],3)
+        for record in records:
+            self.assertEqual(record['evidence']['episode_id'],3)
+            self.assertEqual(record['evidence']['episode_airdate'],'2020-01-01')
+            self.assertEqual(record['evidence']['episode_year_validation'],'exact')
         channel,p=event(episode=True,category='series')
         ET.SubElement(p,'desc').text='Original description'
         ET.SubElement(p,'sub-title').text='Original episode'
@@ -289,6 +292,70 @@ class MediaVerifierTests(unittest.TestCase):
         other=self.adapter(transport=lambda *args:self.fail('cached verifier made request'))
         self.assertTrue(other.verify_media('https://static.tvmaze.com/uploads/images/1.jpg')['verified'])
         self.assertEqual(other.summary()['artwork_status'],'verified')
+
+    def test_complete_encoded_formats_are_verified(self):
+        for mime,body in (('image/png',PNG),('image/jpeg',JPEG),('image/jpeg',PROGRESSIVE_JPEG),('image/webp',WEBP)):
+            with self.subTest(mime=mime, size=len(body)):
+                self.state.db.execute('DELETE FROM artwork')
+                adapter=self.adapter(transport=lambda *args:Response(200,body,{'Content-Type':mime}))
+                self.assertTrue(adapter.verify_media('https://image.tmdb.org/complete')['verified'])
+
+    def test_header_only_truncated_bad_pixel_stream_and_dimensions_rejected(self):
+        import struct
+        huge_jpeg=JPEG.replace(b'\xff\xc0\x00\x11\x08\x00\x02\x00\x02',b'\xff\xc0\x00\x11\x08\xff\xff\xff\xff')
+        bad_webp=bytearray(WEBP); bad_webp[26:30]=b'\xff\x3f\xff\x3f'
+        cases=[('image/png',b'\x89PNG\r\n\x1a\n'),('image/jpeg',b'\xff\xd8\xff'),
+               ('image/webp',b'RIFF\x04\x00\x00\x00WEBP'),('image/png',PNG[:-3]),
+               ('image/jpeg',JPEG[:-2]),('image/jpeg',PROGRESSIVE_JPEG[:-2]),
+               ('image/webp',WEBP[:-2]),('image/png',png(pixels=b'not a zlib stream')),
+               ('image/png',png(width=0)),('image/png',png(width=16384,height=16384,pixels=b'x')),
+               ('image/jpeg',huge_jpeg),('image/webp',bytes(bad_webp))]
+        for mime,body in cases:
+            with self.subTest(mime=mime,size=len(body)):
+                self.state.db.execute('DELETE FROM artwork')
+                adapter=self.adapter(transport=lambda *args:Response(200,body,{'Content-Type':mime}))
+                self.assertFalse(adapter.verify_media('https://image.tmdb.org/incomplete')['verified'])
+                self.assertEqual(adapter.summary()['verified_images'],0)
+
+    def test_incomplete_tables_scans_and_riff_frames_are_rejected(self):
+        # Turn a complete baseline frame into an incomplete DC-only progressive one.
+        dc_only=bytearray(JPEG.replace(b'\xff\xc0',b'\xff\xc2',1))
+        scan=dc_only.index(b'\xff\xda'); size=int.from_bytes(dc_only[scan+2:scan+4],'big')
+        dc_only[scan+size-1:scan+size+2]=b'\x00\x00\x00'
+        bad_table=JPEG.replace(b'\xff\xc4\x00\x1f',b'\xff\xc4\x00\x02',1)
+        no_frame=JPEG.replace(b'\xff\xc0',b'\xff\xe0',1)
+        empty_frame=b'RIFF'+(12).to_bytes(4,'little')+b'WEBPVP8 '+(0).to_bytes(4,'little')
+        partition=bytearray(WEBP); partition[20:23]=b'\xf0\xff\xff'
+        # The RIFF length is deliberately repaired, so a missing chunk body is still rejected.
+        shortened=bytearray(WEBP[:-2]); shortened[4:8]=(len(shortened)-8).to_bytes(4,'little')
+        for mime,body in (('image/jpeg',bytes(dc_only)),('image/jpeg',bad_table),('image/jpeg',no_frame),
+                          ('image/webp',empty_frame),('image/webp',bytes(partition)),('image/webp',bytes(shortened))):
+            with self.subTest(mime=mime,size=len(body)):
+                self.state.db.execute('DELETE FROM artwork')
+                adapter=self.adapter(transport=lambda *args:Response(200,body,{'Content-Type':mime}))
+                self.assertFalse(adapter.verify_media('https://image.tmdb.org/malformed')['verified'])
+
+    def test_lossless_and_animated_webp_are_conservatively_unsupported(self):
+        from xcmate_epg.image_validation import validate_image
+        animation=b'ANIM'+(6).to_bytes(4,'little')+b'\0'*6
+        animated=b'RIFF'+(4+len(animation)).to_bytes(4,'little')+b'WEBP'+animation
+        for body in (LOSSLESS_WEBP,animated):
+            with self.subTest(size=len(body)):
+                with self.assertRaisesRegex(ValueError,'WEBP_UNSUPPORTED_CODING'):
+                    validate_image(body,'image/webp')
+                self.state.db.execute('DELETE FROM artwork')
+                adapter=self.adapter(transport=lambda *args:Response(200,body,{'Content-Type':'image/webp'}))
+                self.assertFalse(adapter.verify_media('https://image.tmdb.org/unsupported')['verified'])
+
+    def test_legacy_header_only_positive_cache_is_retained_but_revalidated(self):
+        url='https://image.tmdb.org/old.png'; key=json.dumps(['verified-image-v1',url])
+        legacy={'verified':True,'sha256':'old','size_bytes':8,'mime_type':'image/png'}
+        self.state.cache(key,legacy,86400)
+        adapter=self.adapter(transport=lambda *args:Response(200,b'\x89PNG\r\n\x1a\n',{'Content-Type':'image/png'}))
+        self.assertFalse(adapter.verify_media(url)['verified'])
+        self.assertEqual(adapter.summary()['image_attempts'],1)
+        self.assertEqual(adapter.summary()['verified_images'],0)
+        self.assertEqual(self.state.cached(key),(True,legacy))
 
     def test_root_credentials_foreign_host_fragment_and_oversize_rejected(self):
         adapter=self.adapter(transport=lambda *args:self.fail('invalid image requested'))
