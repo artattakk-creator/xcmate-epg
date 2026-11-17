@@ -115,6 +115,70 @@ class LiveArtworkTests(unittest.TestCase):
         self.assertEqual(len(records), 1)
         self.assertEqual(adapter.summary()['api_errors'], 1)
 
+    def test_source_tmdb_id_is_preserved_without_becoming_verified_match(self):
+        channel,p=event()
+        ET.SubElement(p,'episode-num',system='tmdb').text='movie/123'
+        adapter=self.adapter(transport=lambda *args:self.fail('implicit request'))
+        result,records=adapter.enrich(channel,p)
+        self.assertEqual(result.findtext('episode-num[@system="tmdb"]'),'movie/123')
+        self.assertEqual(adapter.summary()['programmes_matched'],0)
+        self.assertEqual(adapter.summary()['unique_identities_matched'],0)
+        self.assertEqual(adapter.summary()['api_attempts'],0)
+        self.assertEqual(records,[])
+
+    def test_source_tmdb_id_does_not_block_real_tvmaze_lookup(self):
+        channel,p=event(episode=True,category='series')
+        ET.SubElement(p,'episode-num',system='tmdb').text='tv/123/1/2'
+        def transport(url,headers):
+            if 'search/shows' in url:
+                body=[{'show':dict(id=7,name='Example',premiered='2020-01-01')}]
+            elif '/episodebynumber' in url:
+                body=dict(id=9,season=1,number=2)
+            else:
+                body=dict(id=7,name='Example',premiered='2020-01-01')
+            return Response(200,json.dumps(body).encode(),{})
+        adapter=self.adapter(transport=transport,config={'authorize_tvmaze':True})
+        result,records=adapter.enrich(channel,p)
+        self.assertEqual(result.findtext('episode-num[@system="tmdb"]'),'tv/123/1/2')
+        self.assertEqual(result.findtext('episode-num[@system="tvmaze"]'),'tv/7/1/2')
+        self.assertEqual(adapter.summary()['api_attempts'],3)
+        self.assertEqual(adapter.summary()['programmes_matched'],1)
+
+    def test_legacy_positive_cache_cannot_bypass_current_identity_validation(self):
+        legacy_key=json.dumps(['movie','example','2020','de-DE'])
+        for hit in (dict(id=1,title='Other',release_date='2020',poster_path='/wrong.jpg'),dict(id=1,title='Example',release_date='2021',poster_path='/wrong.jpg')):
+            self.state.cache(legacy_key,hit,86400)
+            adapter=self.adapter(tmdb=MovieClient([]),transport=lambda *args:self.fail('legacy image fetched'))
+            result,records=adapter.enrich(*event())
+            self.assertEqual(records,[])
+            self.assertIsNone(result.find('episode-num[@system="tmdb"]'))
+            self.assertEqual(adapter.summary()['programmes_matched'],0)
+            self.assertEqual(self.state.cached(legacy_key),(True,hit))
+
+    def test_legacy_episode_cache_without_identity_evidence_is_not_a_match(self):
+        key=json.dumps(['tv','example','2020',1,2,'de-DE'])
+        legacy={'id':999,'still':'https://image.tmdb.org/t/p/w500/wrong.jpg'}
+        self.state.cache(key,legacy,86400)
+        client=MovieClient()
+        client.search_series=lambda *args:[]
+        adapter=self.adapter(tmdb=client,transport=lambda *args:self.fail('unproven episode image fetched'))
+        result,records=adapter.enrich(*event(episode=True,category='series'))
+        self.assertEqual(records,[])
+        self.assertIsNone(result.find('episode-num[@system="tmdb"]'))
+        self.assertEqual(adapter.summary()['programmes_matched'],0)
+        self.assertEqual(self.state.cached(key),(True,legacy))
+
+    def test_original_title_match_accepts_same_candidate_localized_details(self):
+        channel,p=event()
+        p.find('title').text='Original'
+        client=MovieClient([dict(id=1,title='Localized',original_title='Original',release_date='2020-01-01',poster_path='/poster.jpg')])
+        client.movie=lambda *args:dict(id=1,title='Localized',original_title='Original',release_date='2020-01-01')
+        adapter=self.adapter(tmdb=client,transport=self.image)
+        result,records=adapter.enrich(channel,p)
+        self.assertEqual(result.findtext('episode-num[@system="tmdb"]'),'movie/1')
+        self.assertTrue(records[0]['verified'])
+        self.assertEqual(adapter.summary()['programmes_matched'],1)
+
     def test_movie_details_conflicting_title_or_year_are_rejected(self):
         for detail in (dict(id=1,title='Other'),dict(id=1,release_date='2021-01-01')):
             client=MovieClient()
