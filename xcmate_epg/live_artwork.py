@@ -71,6 +71,8 @@ class _Cache:
                 extra_found, extra = self.owner.state.cached(extra_key)
                 if not extra_found:
                     return False, None
+                if not self.owner._tmdb_episode_identity(extra.get('detail'), identity[3], identity[4]):
+                    return False, None
                 if not self.owner._episode_year_matches(extra['detail'].get('air_date'), self.episode_year):
                     return True, None
         return found, value
@@ -127,8 +129,7 @@ class _Metadata:
 
     def episode(self, identifier, season, number):
         detail = self.owner._client(self.client, 'episode', identifier, season, number)
-        if (not isinstance(detail, dict) or detail.get('season_number') != season
-                or detail.get('episode_number') != number):
+        if not self.owner._tmdb_episode_identity(detail, season, number):
             raise _Unavailable('metadata mismatch')
         if not self.owner._episode_year_matches(detail.get('air_date'), self.episode_year):
             raise _Unavailable('episode date unavailable or mismatched')
@@ -166,7 +167,7 @@ class ArtworkEnricher:
         self.blocked_hosts = set()
         if isinstance(tmdb, artwork.TMDB):
             # A separate client avoids mutating the caller's reusable client.
-            self.tmdb = artwork.TMDB(tmdb._token, transport=self._api_transport, sleep=lambda _: None)
+            self.tmdb = tmdb.clone(transport=self._api_transport, sleep=lambda _: None)
         if self.authorize_tvmaze and (tvmaze is None or isinstance(tvmaze, artwork.TVMaze)):
             self.tvmaze = artwork.TVMaze(transport=self._api_transport)
 
@@ -303,19 +304,26 @@ class ArtworkEnricher:
             return False
         return True
 
-    def _tmdb_show(self, title):
+    @staticmethod
+    def _tmdb_episode_identity(detail, season, number):
+        return (isinstance(detail, dict) and type(detail.get('id')) is int and detail['id'] > 0
+                and type(detail.get('season_number')) is int and detail['season_number'] == season
+                and type(detail.get('episode_number')) is int and detail['episode_number'] == number)
+
+    def _tmdb_show(self, title, year=''):
         """A programme episode year cannot constrain the series premiere."""
-        key = json.dumps(['live-tmdb-show-v1', artwork.title_key(title)])
+        key = json.dumps(['live-tmdb-show-v1', artwork.title_key(title)] + ([year] if year else []))
         found, hit = self.state.cached(key)
         if found:
             self.counts['metadata_cache_hits'] += 1
             return hit
         try:
-            hits = self._client(self.tmdb, 'search_series', title, '')
+            hits = self._client(self.tmdb, 'search_series', title, year)
             if not isinstance(hits, list):
                 raise _Unavailable('metadata unavailable')
             candidates = {h['id']: h for h in hits if isinstance(h, dict)
                           and type(h.get('id')) is int and h['id'] > 0
+                          and (not year or str(h.get('first_air_date') or '')[:4] == year)
                           and artwork.title_key(title) in
                           {artwork.title_key(h.get('name')), artwork.title_key(h.get('original_name'))}}
             if len(candidates) > 1:
@@ -325,6 +333,101 @@ class ArtworkEnricher:
             return hit
         except (ValueError, TimeoutError, OSError, TypeError, AttributeError):
             return None
+
+    def _tmdb_series_detail(self, title, hit, year=''):
+        """Verify detail identity independently of a search result or episode."""
+        if not callable(getattr(self.tmdb, 'series', None)):
+            return None
+        key = json.dumps(['live-tmdb-series-detail-v1', hit['id'], artwork.title_key(title),
+                          hit.get('name'), hit.get('original_name'), hit.get('first_air_date'), year])
+        found, detail = self.state.cached(key)
+        if found:
+            self.counts['metadata_cache_hits'] += 1
+            return detail
+        try:
+            detail = self._client(self.tmdb, 'series', hit['id'])
+            valid = (isinstance(detail, dict) and type(detail.get('id')) is int
+                     and detail['id'] == hit['id'] and artwork.title_key(title) in
+                     {artwork.title_key(detail.get('name')), artwork.title_key(detail.get('original_name'))})
+            if valid:
+                for field in ('name', 'original_name'):
+                    if hit.get(field) and artwork.title_key(detail.get(field)) != artwork.title_key(hit[field]):
+                        valid = False
+                premiere = str(detail.get('first_air_date') or '')
+                if ((year and premiere[:4] != year) or
+                        (hit.get('first_air_date') and premiere != hit['first_air_date'])):
+                    valid = False
+                if premiere:
+                    try:
+                        if not re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2}', premiere):
+                            raise ValueError()
+                        date.fromisoformat(premiere)
+                    except ValueError:
+                        valid = False
+            detail = detail if valid else None
+            self.state.cache(key, detail, 30 * 86400 if detail else 86400)
+            return detail
+        except (ValueError, TimeoutError, OSError, TypeError, AttributeError):
+            # Authentication, transport and budget failures must remain retryable.
+            return None
+
+    def _tmdb_season(self, identifier, season):
+        if not callable(getattr(self.tmdb, 'season', None)):
+            return None
+        key = json.dumps(['live-tmdb-season-v1', identifier, season])
+        found, detail = self.state.cached(key)
+        if found:
+            self.counts['metadata_cache_hits'] += 1
+            return detail
+        try:
+            detail = self._client(self.tmdb, 'season', identifier, season)
+            valid = (isinstance(detail, dict) and type(detail.get('season_number')) is int
+                     and detail['season_number'] == season)
+            detail = detail if valid else None
+            self.state.cache(key, detail, 30 * 86400 if detail else 86400)
+            return detail
+        except (ValueError, TimeoutError, OSError, TypeError, AttributeError):
+            return None
+
+    def _tmdb_series_metadata(self, programme, detail, *, episode=False):
+        if not episode and not (programme.findtext('desc') or '').strip():
+            overview = detail.get('overview')
+            if isinstance(overview, str) and overview.strip():
+                ET.SubElement(programme, 'desc', {'lang': 'de'}).text = overview
+        original, language = detail.get('original_name'), detail.get('original_language')
+        if (isinstance(original, str) and original.strip() and isinstance(language, str) and language.strip()
+                and original not in [n.text for n in programme.findall('title')]
+                and not any(n.get('lang') == language for n in programme.findall('title')[1:])):
+            ET.SubElement(programme, 'title', {'lang': language}).text = original
+        rating = detail.get('vote_average')
+        if programme.find('star-rating') is None and type(rating) in (int, float) and 0 < rating <= 10:
+            node = ET.SubElement(programme, 'star-rating', {'system': 'TMDB'})
+            ET.SubElement(node, 'value').text = str(rating) + '/10'
+        for genre in detail.get('genres', []) if isinstance(detail.get('genres'), list) else []:
+            name = genre.get('name') if isinstance(genre, dict) else None
+            if isinstance(name, str) and name.strip() and name not in [n.text for n in programme.findall('category')]:
+                ET.SubElement(programme, 'category', {'lang': 'de'}).text = name
+        premiere = detail.get('first_air_date')
+        if not episode and programme.find('date') is None and isinstance(premiere, str):
+            try:
+                date.fromisoformat(premiere)
+            except ValueError:
+                return
+            ET.SubElement(programme, 'date').text = premiere[:4]
+
+    def _tmdb_images(self, programme, detail, identifier, evidence, scope=None):
+        records = []
+        for kind, field in (('poster', 'poster_path'), ('backdrop', 'backdrop_path')):
+            try:
+                url = artwork.image_url(detail.get(field))
+            except ValueError:
+                continue
+            if url:
+                record = self._record(programme, kind, url, 'tmdb', identifier, dict(evidence))
+                if scope:
+                    record['scope'] = scope
+                records.append(record)
+        return records
 
     def _tvmaze_show(self, title, year):
         key = json.dumps(['live-tvmaze-show-v2', artwork.title_key(title), year])
@@ -479,6 +582,18 @@ class ArtworkEnricher:
                             kind = 'backdrop'
                     records.append(self._record(enriched, kind, icon.get('src', ''), 'tmdb', identifier,
                         {'title': 'unicode_normalized_exact', 'year': year, 'episode': list(episode) if episode else None}))
+        if not matched and show and not episode and not source_ns and self.tmdb is not None:
+            hit = self._tmdb_show(title, year)
+            detail = self._tmdb_series_detail(title, hit, year) if hit else None
+            if detail:
+                matched = True
+                identifier = detail['id']
+                ET.SubElement(enriched, 'episode-num', {'system': 'tmdb'}).text = 'tv/' + str(identifier)
+                self._tmdb_series_metadata(enriched, detail)
+                records.extend(self._tmdb_images(enriched, detail, identifier,
+                    {'title': 'unicode_normalized_exact', 'year': year or None,
+                     'series_premiere': detail.get('first_air_date'), 'series_detail_identity': 'exact',
+                     'episode': None}))
         if matched and len(tmdb_identity.split('/')) == 4:
             identifier = int(tmdb_identity.split('/')[1])
             key = json.dumps(['live-tmdb-episode-v1', identifier, *episode]) if episode else ''
@@ -502,16 +617,25 @@ class ArtworkEnricher:
                         record['evidence']['episode_id'] = detail.get('id')
                         record['evidence']['episode_airdate'] = detail.get('air_date')
                         record['evidence']['episode_year_validation'] = 'exact' if year else 'not_supplied'
-                for kind, field in (('poster', 'poster_path'), ('backdrop', 'backdrop_path')):
-                    try:
-                        url = artwork.image_url(series.get(field))
-                    except ValueError:
-                        continue
-                    if url:
-                        records.append(self._record(enriched, kind, url, 'tmdb', identifier,
-                            {'title': 'unicode_normalized_exact', 'year': year, 'episode': list(episode),
-                             'episode_id': detail.get('id'), 'episode_airdate': detail.get('air_date'),
-                             'episode_year_validation': 'exact' if year else 'not_supplied'}))
+                evidence = {'title': 'unicode_normalized_exact', 'year': year, 'episode': list(episode),
+                            'episode_id': detail.get('id'), 'episode_airdate': detail.get('air_date'),
+                            'episode_year_validation': 'exact' if year else 'not_supplied'}
+                verified_series = self._tmdb_series_detail(title, series)
+                if verified_series:
+                    self._tmdb_series_metadata(enriched, verified_series, episode=True)
+                    records.extend(self._tmdb_images(enriched, verified_series, identifier,
+                        dict(evidence, series_detail_identity='exact',
+                             series_premiere=verified_series.get('first_air_date')), scope='series'))
+                else:
+                    # Preserve artwork already proven by the unique exact show
+                    # search and verified episode, even if optional detail fails.
+                    records.extend(self._tmdb_images(enriched, series, identifier, evidence))
+                season = self._tmdb_season(identifier, episode[0])
+                if season:
+                    season_records = self._tmdb_images(enriched, {'poster_path': season.get('poster_path')},
+                        identifier, dict(evidence, season_number=episode[0], season_id=season.get('id'),
+                                         season_identity='exact'), scope='season')
+                    records.extend(season_records)
         if not matched and show and self.authorize_tvmaze:
             value = self._tvmaze_lookup(title, year, episode)
             if value:
@@ -572,6 +696,8 @@ class ArtworkEnricher:
     def summary(self):
         report = dict(self.counts)
         report.update(tmdb_status='configured' if self.tmdb is not None else 'not_configured',
+                      tmdb_live_status=getattr(self, 'tmdb_live_status',
+                          'TMDB_RUNTIME_BOUND' if self.tmdb is not None else 'TMDB_LIVE_PENDING'),
                       tvmaze_status='authorized' if self.authorize_tvmaze else 'not_authorized',
                       artwork_status='verified' if self.counts['verified_images'] else 'zero_verified_images')
         return report

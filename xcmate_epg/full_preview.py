@@ -27,7 +27,8 @@ from .xmltv import IMAGE_HOSTS,public_image
 class _NoArtwork:
     def enrich(self,channel,programme): return programme,[]
     def summary(self): return {'programmes_matched':0,'verified_images':0,'status':'ARTWORK_BLOCKED',
-                              'tmdb_status':'NOT_CONFIGURED','tvmaze_status':'NOT_AUTHORIZED'}
+                              'tmdb_status':'NOT_CONFIGURED','tmdb_live_status':'TMDB_LIVE_PENDING',
+                              'tvmaze_status':'NOT_AUTHORIZED'}
 
 
 def _url_safe(value,forbidden=()):
@@ -137,19 +138,20 @@ def _run(config,root,limits,metadata,artwork_config,authorize_network):
         mapping['catalog_complete']=catalog_complete
         mapping['full_provider_denominator']=len(catalog) if catalog_complete else None
         with State(root/'artwork.sqlite') as state:
-            if metadata is None and (artwork_config.get('authorize_tvmaze') or artwork_config.get('tmdb_secret_env')):
+            if metadata is None and (artwork_config.get('authorize_tvmaze') or artwork_config.get('tmdb_secret_env')
+                                     or artwork_config.get('tmdb_http_binding')):
                 from .live_artwork import ArtworkEnricher
+                from .tmdb_runtime import runtime_tmdb_client, TMDB_LIVE_PENDING
                 tmdb=None; env_name=artwork_config.get('tmdb_secret_env')
                 if env_name and env_name!='TMDB_READ_ACCESS_TOKEN':
                     raise ValueError('ONLY_TMDB_RUNTIME_SECRET_ALLOWED')
                 # A runtime-secret variable must be explicitly named and authorized.
                 # No GitHub token retrieval, token file, CLI token or token serialization.
-                if env_name and authorize_network and re.fullmatch(r'[A-Z][A-Z0-9_]+',env_name):
-                    value=os.environ.get(env_name)
-                    if value:
-                        from .artwork import TMDB
-                        tmdb=TMDB(value)
+                tmdb_live_status=TMDB_LIVE_PENDING
+                if authorize_network and (env_name or artwork_config.get('tmdb_http_binding')):
+                    tmdb,tmdb_live_status=runtime_tmdb_client(binding=artwork_config.get('tmdb_http_binding'))
                 metadata=ArtworkEnricher(state,artwork_config,tmdb=tmdb)
+                metadata.tmdb_live_status=tmdb_live_status
             metadata=metadata or _NoArtwork()
             stage=Path(tempfile.mkdtemp(prefix='.run-pending-',dir=root))
             try:
