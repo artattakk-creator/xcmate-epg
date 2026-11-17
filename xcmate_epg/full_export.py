@@ -1,0 +1,185 @@
+"""Private streaming XMLTV generations; the manifest is the commit point."""
+import gzip
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import tempfile
+from xml.etree import ElementTree as ET
+from xml.parsers import expat
+
+from .export import atomic
+from .xmltv import public_image, timestamp
+
+
+def _copy_atomic(source,target):
+    fd,name=tempfile.mkstemp(prefix='.pending-',dir=target.parent)
+    try:
+        with os.fdopen(fd,'wb') as out, Path(source).open('rb') as stream:
+            shutil.copyfileobj(stream,out,65536); out.flush(); os.fsync(out.fileno())
+        os.replace(name,target)
+    finally:
+        if os.path.exists(name): os.unlink(name)
+
+
+def verify_archive(path, *, image_hosts=None, max_xml_bytes=256*1024*1024, allow_empty=False):
+    """Independent gzip/Expat verifier: no XML tree, no entity expansion."""
+    known=set(); counts={'channels':0,'programmes':0}; depth=0; title=False; has_title=False
+    expanded=0; in_programme=False
+    def reject(*args): raise ValueError('UNSAFE_EXPORT_XML')
+    def start(tag,attrs):
+        nonlocal depth,title,has_title,in_programme
+        depth+=1
+        if depth>32: reject()
+        if depth==1 and tag!='tv': reject()
+        if depth==2 and tag=='channel':
+            identifier=attrs.get('id')
+            if not identifier or identifier in known: raise ValueError('INVALID_EXPORTED_CHANNEL')
+            known.add(identifier); counts['channels']+=1
+        if depth==2 and tag=='programme':
+            if attrs.get('channel') not in known: raise ValueError('DANGLING_EXPORTED_PROGRAMME')
+            if timestamp(attrs.get('start',''))>=timestamp(attrs.get('stop','')): raise ValueError('INVALID_EXPORTED_TIME')
+            counts['programmes']+=1; in_programme=True; has_title=False
+        if depth==3 and tag=='title' and in_programme: title=True
+        if tag=='icon': public_image(attrs.get('src',''),image_hosts)
+    def data(value):
+        nonlocal has_title
+        if title and value.strip(): has_title=True
+    def end(tag):
+        nonlocal depth,title,in_programme
+        if depth==3 and tag=='title': title=False
+        if depth==2 and tag=='programme':
+            if not has_title: raise ValueError('MISSING_EXPORTED_TITLE')
+            in_programme=False
+        depth-=1
+    parser=expat.ParserCreate(encoding='UTF-8'); parser.StartElementHandler=start
+    parser.EndElementHandler=end; parser.CharacterDataHandler=data
+    parser.StartDoctypeDeclHandler=reject; parser.EntityDeclHandler=reject; parser.ExternalEntityRefHandler=reject
+    with gzip.open(path,'rb') as stream:
+        while True:
+            chunk=stream.read(65536)
+            if not chunk: break
+            expanded+=len(chunk)
+            if expanded>max_xml_bytes: raise ValueError('OUTPUT_XML_LIMIT')
+            parser.Parse(chunk,False)
+        parser.Parse(b'',True)
+    if not allow_empty and (not counts['channels'] or not counts['programmes']): raise ValueError('EMPTY_FULL_EXPORT')
+    return dict(counts,xml_bytes=expanded)
+
+
+class _CompressedSink:
+    def __init__(self,stream,limit): self.stream=stream; self.limit=limit; self.size=0
+    def write(self,data):
+        self.size+=len(data)
+        if self.size>self.limit: raise ValueError('OUTPUT_COMPRESSED_LIMIT')
+        return self.stream.write(data)
+    def flush(self): self.stream.flush()
+
+
+def publish_stream(channels,programmes,directory,*,status='PARTIAL_COVERAGE',view='full',
+                   image_hosts=None,max_xml_bytes=256*1024*1024,max_gzip_bytes=64*1024*1024,
+                   forbidden_values=()):
+    if status not in {'PRIVATE_FULL_EPG_CREATED','PARTIAL_COVERAGE','ARTWORK_BLOCKED','SOURCE_BLOCKED'}:
+        raise ValueError('INVALID_FULL_EXPORT_STATUS')
+    if view not in {'full','device'}: raise ValueError('INVALID_EXPORT_VIEW')
+    directory=Path(directory); directory.mkdir(parents=True,exist_ok=True,mode=0o700)
+    directory.chmod(0o700)
+    if directory.is_symlink(): raise ValueError('UNSAFE_EXPORT_DIRECTORY')
+    stage=Path(tempfile.mkdtemp(prefix='.pending-',dir=directory))
+    archive=stage/'xcmate-epg.xml.gz'; known=set(); expected={'channels':0,'programmes':0}; xml_size=0
+    forbidden=[value.encode() if isinstance(value,str) else value for value in forbidden_values if value]
+    def validate_node(node):
+        for icon in node.iter('icon'):
+            if set(icon.attrib)-{'src','width','height'} or len(icon) or (icon.text or '').strip():
+                raise ValueError('INVALID_EXPORTED_ICON')
+            public_image(icon.get('src',''),image_hosts)
+        payload=ET.tostring(node,encoding='utf-8')
+        if len(payload)>2*1024*1024: raise ValueError('EXPORT_RECORD_LIMIT')
+        if any(value in payload for value in forbidden): raise ValueError('PRIVATE_SOURCE_OR_CREDENTIAL_IN_EXPORT')
+        if re.search(rb'Bearer\s|(?:password|token|api_key|username)\s*[:=]',payload,re.I):
+            raise ValueError('CREDENTIAL_PATTERN_IN_EXPORT')
+        return payload
+    try:
+        with archive.open('wb') as raw:
+            sink=_CompressedSink(raw,max_gzip_bytes)
+            with gzip.GzipFile(filename='',mode='wb',fileobj=sink,mtime=0) as out:
+                def write(payload):
+                    nonlocal xml_size
+                    xml_size+=len(payload)
+                    if xml_size>max_xml_bytes: raise ValueError('OUTPUT_XML_LIMIT')
+                    out.write(payload)
+                write(b'<?xml version="1.0" encoding="utf-8"?>\n<tv generator-info-name="XCMate EPG Agent V2">\n')
+                for node in channels:
+                    identifier=node.get('id')
+                    if not identifier or identifier in known: raise ValueError('DUPLICATE_EXPORTED_CHANNEL')
+                    known.add(identifier); expected['channels']+=1
+                    write(validate_node(node)+b'\n')
+                for node in programmes:
+                    if node.get('channel') not in known or not (node.findtext('title') or '').strip():
+                        raise ValueError('INVALID_EXPORTED_PROGRAMME')
+                    if timestamp(node.get('start',''))>=timestamp(node.get('stop','')):
+                        raise ValueError('INVALID_EXPORTED_TIME')
+                    # XMLTV field ordering, preserving all repeated metadata fields.
+                    names='title sub-title desc credits date category keyword language orig-language length icon url country episode-num video audio previously-shown premiere last-chance new subtitles rating star-rating review'.split()
+                    ranks={name:i for i,name in enumerate(names)}
+                    node[:]=sorted(node,key=lambda child:ranks.get(child.tag,len(ranks)))
+                    expected['programmes']+=1; write(validate_node(node)+b'\n')
+                write(b'</tv>\n')
+            raw.flush(); os.fsync(raw.fileno())
+        archive.chmod(0o600)
+        checked=verify_archive(archive,image_hosts=image_hosts,max_xml_bytes=max_xml_bytes,allow_empty=view=='device')
+        if any(checked[key]!=value for key,value in expected.items()) or checked['xml_bytes']!=xml_size:
+            raise ValueError('EXPORT_COUNT_MISMATCH')
+        digest=hashlib.sha256()
+        with archive.open('rb') as stream:
+            for chunk in iter(lambda:stream.read(65536),b''): digest.update(chunk)
+        sha=digest.hexdigest(); name='xcmate-epg.xml.gz'; checksum=sha+'  '+name+'\n'
+        manifest={'schema_version':2,'status':status,'view':view,'version':sha,'sha256':sha,
+                  'file':f'versions/{sha}/{name}','bytes':archive.stat().st_size,'xml_bytes':xml_size,**expected}
+        previous=directory/'manifest.json'
+        previous_generation=None; previous_manifest=None
+        try:
+            old=json.loads(previous.read_text())
+            old_sha=old.get('sha256','')
+            if (re.fullmatch('[a-f0-9]{64}',old_sha) and old.get('file')==f'versions/{old_sha}/{name}'
+                    and _sha_file(directory/old['file'])==old_sha):
+                previous_generation=directory/old['file']; previous_manifest=previous.read_bytes()
+            if (old==manifest and (directory/manifest['file']).is_file()
+                    and (directory/name).is_file()
+                    and (directory/(name+'.sha256')).read_text()==checksum):
+                # Check bytes, not just existence, before accepting unchanged publication.
+                if all(_sha_file(p)==sha for p in (directory/name,directory/manifest['file'])):
+                    return old
+        except (OSError,ValueError): pass
+        generation=directory/'versions'/sha; generation.mkdir(parents=True,exist_ok=True,mode=0o700)
+        generation.chmod(0o700); (directory/'versions').chmod(0o700)
+        _copy_atomic(archive,generation/name)
+        atomic(generation/(name+'.sha256'),checksum.encode())
+        try:
+            _copy_atomic(generation/name,directory/name)
+            atomic(directory/(name+'.sha256'),checksum.encode())
+            atomic(previous,(json.dumps(manifest,sort_keys=True,indent=2)+'\n').encode())
+        except BaseException:
+            if previous_generation is not None:
+                # Restore convenience aliases too, using immutable LastGood. The
+                # old generation remains valid even if storage itself fails here.
+                try:
+                    _copy_atomic(previous_generation,directory/name)
+                    (stage/'previous.sha256').write_text(old_sha+'  '+name+'\n')
+                    (stage/'previous.json').write_bytes(previous_manifest)
+                    _copy_atomic(stage/'previous.sha256',directory/(name+'.sha256'))
+                    _copy_atomic(stage/'previous.json',previous)
+                except OSError: pass
+            raise
+        return manifest
+    finally:
+        shutil.rmtree(stage)
+
+
+def _sha_file(path):
+    digest=hashlib.sha256()
+    with Path(path).open('rb') as stream:
+        for chunk in iter(lambda:stream.read(65536),b''): digest.update(chunk)
+    return digest.hexdigest()
