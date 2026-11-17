@@ -32,18 +32,31 @@ def image_url(path):
 
 
 class TMDB:
-    def __init__(self,token,transport=http_get,sleep=time.sleep):
-        if not token or '\n' in token or '\r' in token:
+    def __init__(self,token=None,transport=http_get,sleep=time.sleep,*,managed_http=False):
+        if managed_http and token is not None:
+            raise ValueError('conflicting authentication modes')
+        if not managed_http and (not isinstance(token,str) or not token or '\n' in token or '\r' in token):
             raise ValueError('missing or invalid bearer credential')
         self._token=token
+        self._managed_http=bool(managed_http)
         self.transport=transport
         self.sleep=sleep
+
+    @property
+    def auth_mode(self):
+        return 'managed_http' if self._managed_http else 'bearer'
+
+    def clone(self,*,transport=None,sleep=None):
+        """Keep the caller's explicit auth mode when applying bounded transport."""
+        return TMDB(self._token, self.transport if transport is None else transport,
+                    self.sleep if sleep is None else sleep, managed_http=self._managed_http)
 
     def _get(self,path,params=None):
         url='https://api.themoviedb.org/3/'+path+'?'+urlencode(params or {'language':'de-DE'})
         for attempt in range(3):
             try:
-                response=self.transport(url,{'Authorization':'Bearer '+self._token})
+                headers={} if self._managed_http else {'Authorization':'Bearer '+self._token}
+                response=self.transport(url,headers)
                 if response.status==429 or 500<=response.status<=599:
                     raise TimeoutError()
                 if response.status!=200: raise ValueError()
@@ -80,6 +93,19 @@ class TMDB:
     def movie(self,identifier):
         if not isinstance(identifier,int) or identifier<=0: raise ValueError('invalid movie ID')
         return self._get(f'movie/{identifier}')
+
+    def series(self,identifier):
+        if type(identifier) is not int or identifier<=0: raise ValueError('invalid series ID')
+        return self._get(f'tv/{identifier}')
+
+    def season(self,identifier,season):
+        if type(identifier) is not int or identifier<=0 or type(season) is not int or season<0:
+            raise ValueError('invalid season identifiers')
+        return self._get(f'tv/{identifier}/season/{season}')
+
+    def configuration(self):
+        """Explicit bounded caller-requested metadata authentication check."""
+        return self._get('configuration')
 
 
 def enrich(root,state,search,details=None):
