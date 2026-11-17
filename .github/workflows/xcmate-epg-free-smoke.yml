@@ -7,6 +7,8 @@ on:
     paths:
       - "tools/**"
       - "tests/**"
+      - "AGENTS.md"
+      - "docs/NEXT_STEPS_DE.md"
       - ".github/workflows/xcmate-epg-free-smoke.yml"
   workflow_dispatch:
 
