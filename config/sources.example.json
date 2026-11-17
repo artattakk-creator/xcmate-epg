@@ -1,0 +1,6 @@
+{
+  "sources": [],
+  "aliases": [],
+  "documented_source_families": ["EPGShare DE", "EPGShare AT", "Kaimandura"],
+  "note": "No feed addresses or private provider IDs. Empty sources run a synthetic demo."
+}
