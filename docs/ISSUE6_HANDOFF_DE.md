@@ -4,6 +4,18 @@ Branch: `feat/full-epg-coverage-artwork-issue6`.
 Draft-PR: https://github.com/artattakk-creator/xcmate-epg/pull/7
 Basis bleibt PR #5 / `feat/private-live-preview-issue-4`; kein Merge.
 
+## Aktueller Abschlussauftrag: keine weiteren Läufe
+
+Die Arbeiten sind auf Benutzeranweisung kontrolliert gestoppt. Maßgeblich für
+den aktuellen Stand ist der [Abschlussbericht](ABSCHLUSS_PRIVATER_WORKSPACE_2026-11-17_DE.md):
+Code/Test-Commit `1e80645`, zuletzt 217 Tests Exit 0, neues privates Vollarchiv
+mit 964 Dateien und zehn integritätsgeprüften SQLite-Datenbanken. Das Archiv wurde
+lokal erfolgreich wiederhergestellt, **noch nicht in eine neue Umgebung übertragen**.
+Vor einem Wechsel den alten Arbeitsbereich erhalten. Keine erneuten Live- oder
+Artwork-Läufe ohne neuen Auftrag. Die folgenden Abschnitte beschreiben den älteren
+Abnahmestand; sie ersetzen den neueren Abschlussbericht nicht. Vier Kandidaten
+beruhen auf Provider-EPG-IDs, nicht allein auf Sendernamen.
+
 ## Gesicherter Entwicklungsstand
 
 Vollständige Streaming-Verarbeitung, getrennte Quellenidentitäten, SQLite-Spool,
