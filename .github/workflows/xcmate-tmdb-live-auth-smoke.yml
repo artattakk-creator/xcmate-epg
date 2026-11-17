@@ -1,0 +1,97 @@
+name: XCMate TMDB – manual authenticated live smoke
+
+# Explicit manual test only. No real private EPG sources or outputs.
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: xcmate-tmdb-live-auth-smoke
+  cancel-in-progress: false
+
+jobs:
+  tmdb-live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    env:
+      TMDB_READ_ACCESS_TOKEN: ${{ secrets.TMDB_READ_ACCESS_TOKEN }}
+    steps:
+      - name: Verify live TMDB metadata and public artwork without exposing credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import sys
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          token = os.environ.get('TMDB_READ_ACCESS_TOKEN', '').strip()
+          if not token or any(c in token for c in '\r\n'):
+              sys.exit('FAIL: TMDB_READ_ACCESS_TOKEN missing or malformed')
+          # All API operations stay on TMDB; public image requests never get bearer headers.
+          class NeverRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  raise ValueError('redirect refused')
+          opener = urllib.request.build_opener(NeverRedirect)
+
+          def fetch(host, path, auth=False, max_size=2*1024*1024):
+              if host not in ('api.themoviedb.org', 'image.tmdb.org'):
+                  raise ValueError('host not authorized')
+              if auth != (host == 'api.themoviedb.org'):
+                  raise ValueError('credential/host mismatch')
+              url = 'https://' + host + path
+              h = {'User-Agent': 'XCMate-EPG-TMDB-Smoke/1.0'}
+              if auth:
+                  h['Authorization'] = 'Bearer ' + token
+                  h['Accept'] = 'application/json'
+              req = urllib.request.Request(url, headers=h, method='GET')
+              try:
+                  with opener.open(req, timeout=20) as response:
+                      payload = response.read(max_size + 1)
+                      if len(payload) > max_size:
+                          raise ValueError('response size exceeded')
+                      return response.status, payload
+              except urllib.error.HTTPError as e:
+                  return e.code, b''
+
+          status, data = fetch('api.themoviedb.org', '/3/configuration', True)
+          if status != 200:
+              sys.exit('FAIL: authenticated TMDB configuration HTTP ' + str(status))
+          cfg = json.loads(data)
+          if not isinstance(cfg.get('images'), dict):
+              sys.exit('FAIL: unexpected TMDB configuration')
+          print('PASS: TMDB authenticated configuration HTTP 200')
+
+          path = '/3/search/movie?' + urllib.parse.urlencode({'query': 'The Matrix', 'language':'en-US', 'page':1})
+          status, data = fetch('api.themoviedb.org', path, True)
+          if status != 200:
+              sys.exit('FAIL: TMDB movie search HTTP ' + str(status))
+          movies = json.loads(data).get('results', [])
+          if not movies:
+              sys.exit('FAIL: TMDB movie search yielded no results')
+          print('PASS: live TMDB movie metadata found')
+
+          path = '/3/search/tv?' + urllib.parse.urlencode({'query': 'Modern Family', 'language':'en-US', 'page':1})
+          status, data = fetch('api.themoviedb.org', path, True)
+          if status != 200:
+              sys.exit('FAIL: TMDB TV search HTTP ' + str(status))
+          shows = json.loads(data).get('results', [])
+          if not shows:
+              sys.exit('FAIL: TMDB TV series search yielded no results')
+          print('PASS: live TMDB TV metadata found')
+
+          posters = [m.get('poster_path') for m in movies if isinstance(m.get('poster_path'), str)]
+          poster = next((p for p in posters if re.fullmatch(r'/[A-Za-z0-9_.-]+', p)), None)
+          if not poster:
+              sys.exit('FAIL: TMDB results contain no validated image path')
+          status, data = fetch('image.tmdb.org', '/t/p/w92' + poster, False, 1024*1024)
+          if status != 200 or not (data.startswith(b'\xff\xd8\xff') or data.startswith(b'\x89PNG')):
+              sys.exit('FAIL: unauthenticated public TMDB artwork fetch failed (HTTP ' + str(status) + ')')
+          print('PASS: TMDB public poster fetch completed without API token')
+          print('SUCCESS: live TMDB metadata and image connectivity verified')
+          PY
