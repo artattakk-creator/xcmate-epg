@@ -120,6 +120,37 @@ class BulkMetadataTests(unittest.TestCase):
         self.assertNotIn('/shows/7/episodebynumber', self.requests)
         self.assertEqual(adapter.summary()['ambiguous'], 3)
 
+    def test_bulk_quarantines_regular_episodes_with_special_or_unnumbered_collisions(self):
+        regular = episode()
+        missing_number = episode(8, id=12)
+        del missing_number['number']
+        for conflicting in (episode(8, id=12, type='significant_special'),
+                            episode(8, id=12, number=None),
+                            episode(2, id=33, type='insignificant_special'),
+                            episode(8, id=12, type='unknown'), missing_number):
+            for rows in ([regular, conflicting], [conflicting, regular]):
+                with self.subTest(rows=rows):
+                    self.state.db.execute('DELETE FROM artwork')
+                    self.requests.clear()
+                    self.routes['/shows/7/episodes'] = rows + [episode(3)]
+                    adapter = self.adapter()
+                    result, _ = adapter.enrich(*self.programme(2))
+                    self.assertIsNone(result.find('episode-num[@system="tvmaze"]'))
+                    self.assertEqual(adapter.summary()['ambiguous'], 1)
+                    result, _ = adapter.enrich(*self.programme(3))
+                    self.assertEqual(result.findtext('episode-num[@system="tvmaze"]'), 'tv/7/1/3')
+                    self.assertNotIn('/shows/7/episodebynumber', self.requests)
+
+    def test_bulk_requires_explicit_regular_type_and_rebuilds_old_indexes(self):
+        episode_with_no_type = episode()
+        del episode_with_no_type['type']
+        self.routes['/shows/7/episodes'] = [episode_with_no_type]
+        self.state.cache(json.dumps(['live-tvmaze-episodes-v1', 7]), {'1/2': episode()}, 300)
+        result, _ = self.adapter().enrich(*self.programme(2))
+        self.assertIsNone(result.find('episode-num[@system="tvmaze"]'))
+        self.assertIn('/shows/7/episodes', self.requests)
+        self.assertNotIn('/shows/7/episodebynumber', self.requests)
+
     def test_unavailable_bulk_list_can_fall_back_and_retry_after_restart(self):
         for invalid in (Response(503, b'', {}), {'not': 'episodes'}, [episode(season=True)]):
             with self.subTest(invalid=invalid):
@@ -223,6 +254,70 @@ class BulkMetadataTests(unittest.TestCase):
         result, _ = adapter.enrich(channel, programme)
         self.assertEqual([n.text for n in result.findall('sub-title')], ['Source Title'])
         self.assertEqual([n.text for n in result.findall('desc')], ['Source Plot'])
+
+    def series_adapters(self):
+        self.routes['/shows/7'] = dict(SHOW, summary='<p>Series plot</p>')
+        self.routes['/shows/7/cast'] = [{'person': {'name': 'Series Actor'}}]
+        self.routes['/shows/7/episodes'] = [episode(summary='<p>Episode plot</p>')]
+        self.routes.update({
+            '/3/search/tv': {'results': [{'id': 2, 'name': 'Example', 'first_air_date': '2020-02-03'}]},
+            '/3/tv/2': {'id': 2, 'name': 'Example', 'first_air_date': '2020-02-03',
+                        'overview': 'Series plot', 'vote_average': 7.8},
+            '/3/tv/2/aggregate_credits': {'id': 2, 'cast': [{'name': 'Series Actor'}]},
+            '/3/tv/2/season/1/episode/2': {'id': 3, 'season_number': 1, 'episode_number': 2,
+                                         'air_date': '2020-02-03', 'overview': 'Episode plot'},
+            '/3/tv/2/season/1': {'id': 4, 'season_number': 1},
+        })
+        return (self.adapter(), self.adapter(bulk=False),
+                ArtworkEnricher(self.state, {'request_interval': 0, 'tmdb_credits': True},
+                                tmdb=TMDB('synthetic-test'), transport=self.transport))
+
+    def test_unresolved_source_episode_markers_prevent_standalone_series_enrichment(self):
+        for adapter in self.series_adapters():
+            for attributes, text in (({'system': 'onscreen'}, 'S1 E2'),
+                                     ({'system': 'source-catalogue'}, 'S1 E2'), ({}, 'S1 E2'),
+                                     ({'system': 'xmltv_ns'}, 'malformed'),
+                                     ({'system': 'tmdb'}, 'tv/123/1/2'),
+                                     ({'system': 'tvmaze'}, 'tv/123/1/2'),
+                                     ({'system': 'tmdb'}, 'tv/123/1/2/extra')):
+                with self.subTest(adapter=adapter, attributes=attributes, text=text):
+                    channel, programme = self.programme(year='')
+                    ET.SubElement(ET.SubElement(programme, 'credits'), 'actor', role='Source Role').text = 'Source Actor'
+                    ET.SubElement(programme, 'episode-num', attributes).text = text
+                    result, records = adapter.enrich(channel, programme)
+                    self.assertEqual(ET.tostring(result), ET.tostring(programme))
+                    self.assertEqual(records, [])
+                    self.assertIsNone(adapter.last_metadata)
+        self.assertEqual(self.requests, [])
+
+    def test_series_only_source_provider_ids_allow_independent_series_lookup(self):
+        for adapter in self.series_adapters():
+            for system in ('tmdb', 'tvmaze'):
+                for text in ('tv/123', 'movie/123'):
+                    with self.subTest(adapter=adapter, system=system, text=text):
+                        channel, programme = self.programme()
+                        ET.SubElement(programme, 'episode-num', system=system).text = text
+                        result, _ = adapter.enrich(channel, programme)
+                        self.assertEqual(result.findtext('desc'), 'Series plot')
+                        self.assertEqual(adapter.last_metadata['scope'], 'series')
+                        self.assertIn(adapter.last_metadata['provider_id'], (2, 7))
+                        self.assertIn(text, [n.text for n in result.findall(f'episode-num[@system="{system}"]')])
+
+    def test_independent_xmltv_coordinates_override_untrusted_provider_episode_shape(self):
+        for adapter in self.series_adapters():
+            for system in ('tmdb', 'tvmaze'):
+                with self.subTest(adapter=adapter, system=system):
+                    channel, programme = self.programme(2)
+                    ET.SubElement(programme, 'episode-num', system=system).text = 'tv/123/8/9'
+                    result, _ = adapter.enrich(channel, programme)
+                    self.assertEqual(adapter.last_metadata['scope'], 'episode')
+                    self.assertIn(adapter.last_metadata['provider_id'], (2, 7))
+                    self.assertIsNone(result.find('credits'))
+                    self.assertIn('tv/123/8/9', [n.text for n in result.findall(f'episode-num[@system="{system}"]')])
+                    self.assertTrue(any(n.text in ('tv/7/1/2', 'tv/2/1/2') for n in result.findall('episode-num')))
+                    expected_plot = 'Episode plot' if adapter.tvmaze_bulk_metadata or adapter.tmdb else 'Series plot'
+                    self.assertEqual(result.findtext('desc'), expected_plot)
+
     def test_tmdb_credits_are_opt_in_and_bound_to_verified_provider_id(self):
         self.routes.update({
             '/3/search/movie': {'results': [{'id': 1, 'title': 'Example', 'release_date': '2020-02-03'}]},

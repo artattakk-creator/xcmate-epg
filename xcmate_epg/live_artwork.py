@@ -3,6 +3,7 @@
 No environment credentials are read. Input source artwork remains private until a
 concrete image has passed the same verifier used for provider artwork.
 """
+from collections import Counter
 import copy
 from datetime import date
 import hashlib
@@ -24,6 +25,17 @@ _API_BODY_LIMIT = 8 * 1024 * 1024
 _MAX_BULK_EPISODES = 50_000
 _MAX_CAST = 100
 _MAX_EPISODE_SUMMARY = 32_768
+
+
+def source_episode_marker(programme):
+    """Detect episode scope without trusting source provider IDs for matching."""
+    for node in programme.findall('episode-num'):
+        if node.get('system') not in {'tmdb', 'tvmaze'}:
+            return True
+        parts = (node.text or '').strip().split('/')
+        if len(parts) >= 4 and parts[0] == 'tv':
+            return True
+    return False
 
 
 def parse_xmltv_ns(value):
@@ -532,31 +544,35 @@ class ArtworkEnricher:
     def _index_tvmaze_episodes(rows):
         if len(rows) > _MAX_BULK_EPISODES:
             raise _Unavailable('metadata unavailable')
-        index, episode_ids = {}, {}
+        episode_ids, coordinates = Counter(), Counter()
         for row in rows:
-            if (not isinstance(row, dict) or type(row.get('id')) is not int or row['id'] <= 0
-                    or 'season' not in row or 'number' not in row):
+            if not isinstance(row, dict) or type(row.get('id')) is not int or row['id'] <= 0:
                 raise _Unavailable('metadata unavailable')
-            season, number = row['season'], row['number']
+            season, number = row.get('season'), row.get('number')
             if any(n is not None and (type(n) is not int or n < 0) for n in (season, number)):
                 raise _Unavailable('metadata unavailable')
-            if not season or not number or row.get('type', 'regular') != 'regular':
+            episode_ids[row['id']] += 1
+            if season and number:
+                coordinates[season, number] += 1
+
+        # Specials and unknown or unnumbered episodes cannot match, but still
+        # count as conflicts when they share an ID or a complete coordinate.
+        index = {}
+        for row in rows:
+            season, number = row.get('season'), row.get('number')
+            if not season or not number or row.get('type') != 'regular':
                 continue
             coordinate = f'{season}/{number}'
-            previous = episode_ids.get(row['id'])
-            if previous is not None:
-                index[previous] = None
-            if previous is not None or coordinate in index:
+            if episode_ids[row['id']] > 1 or coordinates[season, number] > 1:
                 index[coordinate] = None
-            else:
-                episode = {key: row[key] for key in
-                    ('id', 'season', 'number', 'type', 'airdate', 'image', 'rating') if key in row}
-                for key, limit in (('name', 512), ('summary', _MAX_EPISODE_SUMMARY)):
-                    value = row.get(key)
-                    if isinstance(value, str) and len(value) <= limit:
-                        episode[key] = value
-                index[coordinate] = episode
-            episode_ids[row['id']] = coordinate
+                continue
+            episode = {key: row[key] for key in
+                ('id', 'season', 'number', 'type', 'airdate', 'image', 'rating') if key in row}
+            for key, limit in (('name', 512), ('summary', _MAX_EPISODE_SUMMARY)):
+                value = row.get(key)
+                if isinstance(value, str) and len(value) <= limit:
+                    episode[key] = value
+            index[coordinate] = episode
         return index
 
     def _tvmaze_episode_index(self, identifier):
@@ -568,7 +584,7 @@ class ArtworkEnricher:
         if identifier in self._failed_bulk_shows:
             return None
         self._episode_index = (None, None)
-        key = json.dumps(['live-tvmaze-episodes-v1', identifier])
+        key = json.dumps(['live-tvmaze-episodes-v2', identifier])
         found, index = self._cached_metadata(key)
         if not found:
             try:
@@ -733,11 +749,13 @@ class ArtworkEnricher:
         parsed = [parse_xmltv_ns(value) for value in ns_values]
         episode = parsed[0] if parsed and parsed[0] is not None and all(p == parsed[0] for p in parsed) else None
         categories = {artwork.title_key(c.text) for c in programme.findall('category')}
-        movie = bool(categories & {'movie', 'film', 'spielfilm'}) and not any(
-            n.get('system') not in {'tmdb', 'tvmaze'} for n in programme.findall('episode-num'))
+        has_source_episode = source_episode_marker(programme)
+        movie = bool(categories & {'movie', 'film', 'spielfilm'}) and not has_source_episode
         show = bool(episode or categories & {'series', 'serie', 'tv series', 'tv show', 'fernsehserie'})
+        standalone_series = show and not has_source_episode
         eligible = bool((movie and year) or show)
-        identity = (artwork.title_key(title), year, episode, 'movie' if movie else 'tv' if show else 'unknown')
+        identity = (artwork.title_key(title), year, episode, has_source_episode,
+                    'movie' if movie else 'tv' if show else 'unknown')
         if identity not in self.identities:
             self.identities.add(identity)
             self.counts['unique_identities_considered'] += 1
@@ -810,7 +828,7 @@ class ArtworkEnricher:
                             kind = 'backdrop'
                     records.append(self._record(enriched, kind, icon.get('src', ''), 'tmdb', identifier,
                         {'title': 'unicode_normalized_exact', 'year': year, 'episode': list(episode) if episode else None}))
-        if provider is None and show and not episode and not source_ns and self.tmdb is not None:
+        if provider is None and standalone_series and self.tmdb is not None:
             hit = self._tmdb_show(title, year)
             detail = self._tmdb_series_detail(title, hit, year) if hit else None
             if detail:
@@ -864,7 +882,7 @@ class ArtworkEnricher:
                         identifier, dict(evidence, season_number=episode[0], season_id=season.get('id'),
                                          season_identity='exact'), scope='season')
                     records.extend(season_records)
-        if provider is None and show and self.authorize_tvmaze and (episode or not source_ns):
+        if provider is None and self.authorize_tvmaze and (episode or standalone_series):
             value = self._tvmaze_lookup(title, year, episode)
             if value:
                 provider, scope = 'tvmaze', 'episode' if episode else 'series'
