@@ -1,0 +1,44 @@
+{
+  "status": "LIVE_INPUT_BLOCKED",
+  "date": "2026-11-17",
+  "configured_sources": 3,
+  "real_sources_successful": 0,
+  "channels": 0,
+  "programmes": 0,
+  "artwork_matched": 0,
+  "logos_present": 0,
+  "programme_images_present": 0,
+  "channel_map_confirmed": 0,
+  "time_range": null,
+  "size_bytes": null,
+  "sha256": null,
+  "output_exists": false,
+  "artwork_status": "PENDING",
+  "errors": 3,
+  "cause": "Enforced restricted egress: both configured feed hosts absent from allowlist; HTTPS CONNECT rejected by proxy with 403. No origin HTTP response or payload received.",
+  "sources": [
+    {
+      "id": "s1",
+      "origin_http_status": null,
+      "proxy_tunnel_status": 403,
+      "cache_status": "missing",
+      "payload_measured": false
+    },
+    {
+      "id": "s2",
+      "origin_http_status": null,
+      "proxy_tunnel_status": 403,
+      "cache_status": "missing",
+      "payload_measured": false
+    },
+    {
+      "id": "s3",
+      "origin_http_status": null,
+      "proxy_tunnel_status": 403,
+      "cache_status": "missing",
+      "payload_measured": false
+    }
+  ],
+  "validation": "46 offline unit/mock tests passed; original smoke passed. No real XMLTV/GZIP/SHA/LastGood acceptance possible without input.",
+  "private_transfer": "No XMLTV created; no download endpoint claimed. Local authenticated transfer procedure in PRIVATE_LIVE_PREVIEW_DE.md."
+}
