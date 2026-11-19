@@ -1,0 +1,25 @@
+# NOT under .github/workflows; deliberately not executable.
+# Before activation: rights, protected persistent state, TMDB attribution,
+# source/mapping review, cache size/retention and explicit release approval.
+name: XCMate EPG Agent - future trusted production
+on:
+  workflow_dispatch:
+  # schedule:
+  #   - cron: '17 3 * * *'
+permissions:
+  contents: read
+concurrency:
+  group: xcmate-production
+  cancel-in-progress: false
+jobs:
+  aggregate:
+    if: false # separate production authorization required
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - run: echo 'Protected persistent storage and private delivery approval required'
+# Future trusted runner: restore private snapshots and state before invoking
+# python -m xcmate_epg.daily with owner-only configuration, source rights and
+# a persistent state path. Require separate authorization before adding
+# --authorize-network, enabling this job or configuring the 24-hour trigger.
+# See docs/ISSUE498_PRIVATE_DAILY_DE.md. Keep private data outside public CI.

@@ -1,8 +1,12 @@
 # XCMate EPG Agent
 
-Zentraler, optionaler XMLTV-Dienst für **XCMate / Kodi**. Ziel: ausgewählte, rechtmäßig verwendbare EPG-Quellen inkrementell zusammenführen, TV-Programme mit freigegebenem Artwork und zulässigen Senderlogos ergänzen sowie eine validierte XMLTV-GZIP-Datei bereitstellen.
+Zentraler, optionaler XMLTV-Dienst für **XCMate / Kodi**. Er führt freigegebene XMLTV-Quellen inkrementell zusammen und ergänzt verifizierte Sendungsbilder und Senderlogos. Der geplante Kodi-Bezug verwendet ein separates privates GitHub-Repository.
 
-> **Status: Einrichtung / noch kein produktiver EPG-Agent.** Keine echten Datenquellen, automatischen 24-Stunden-Jobs, TMDB-Secrets oder öffentliche EPG-Datei sind hier bislang eingerichtet. Kostenpflichtige Dienste werden nicht verwendet.
+> **Status: PRIVATE_PENDING / PRODUCTION_DATA_NOT_APPROVED.** Der Tageslauf und der Schema-3-Liefervertrag sind für synthetische Entwicklungstests verfügbar. Für den Produktivbetrieb stehen die separate Freigabe, der geschützte Restore und die Geräteabnahme aus.
+
+Den lokalen Tageslauf, die eigenständige Profilableitung und den Git-Liefertest beschreibt [Issue #498](docs/ISSUE498_PRIVATE_DAILY_DE.md).
+Historische Vollimporte und Bildnachweise stehen im [Issue-6-Runbook](docs/ISSUE6_PRIVATE_FULL_DE.md).
+Alle tatsächlichen EPG-Daten, persönlichen Kataloge und Caches bleiben privat außerhalb von Git.
 
 ## Projektverknüpfungen
 
@@ -16,10 +20,8 @@ XCMate soll später unter **Einstellungen → EPG → XCMate EPG Agent** einen e
 
 | Repository | Zweck |
 |---|---|
-| `xcmate-epg` (hier) | Server-Agent, Quellenprüfung, Delta-XMLTV, Bild-/Logo-Zuordnung, Tests und Pages-Publikation |
+| `xcmate-epg` (hier) | Server-Agent, Quellenprüfung, Delta-XMLTV, Bild-/Logo-Zuordnung und lokaler Test des privaten XMLTV-Liefervertrags |
 | `kodi-noodleprivate` | Kodi-Client, Aktivierungsschalter, EPG-Import, Source-ID-Mapping, UI und Android-Abnahme |
-
-Der geplante Downloadpfad lautet `https://artattakk-creator.github.io/xcmate-epg/xcmate-epg.xml.gz`; **er ist noch nicht veröffentlicht**.
 
 ## Kostenloser Ersttest
 
@@ -30,10 +32,29 @@ Die GitHub-Budgets bleiben auf 0 USD. Kein Budget erhöhen und keine kostenpflic
 ## Sicherheit und Rechte
 
 - **Keine persönlichen Senderkataloge, Portaladressen, EPG-Zugangsdaten oder Backups** in dieses öffentliche Repository laden.
-- Der `TMDB_READ_ACCESS_TOKEN` muss später ausdrücklich und **separat als Repository-Secret** für dieses Repository angelegt werden; Repository-Secrets werden nicht automatisch zwischen Repositories geteilt.
+- Der private Codex-Lauf verwendet ausschließlich die ausdrücklich autorisierte Runtime-Bindung von `TMDB_READ_ACCESS_TOKEN`. Persönliche HTTP-Secrets und GitHub-Repository-Secrets sind getrennt; Zugangsdaten werden nicht zwischen ihnen kopiert. Details und Live-Status stehen im Issue-6-Runbook.
 - TMDB-API-Anfragen verwenden den geheimen Bearer-Token; XMLTV-Bild-URLs dürfen **keinen** Token enthalten.
-- Quellen-/Artwork-Lizenzen und das Recht zur öffentlichen Weitergabe **vor** einer GitHub-Pages-Veröffentlichung prüfen. **Personal Use** allein erlaubt keine öffentliche Wiederveröffentlichung.
-- Öffentliche XMLTV-/Pages-Dateien und Manifeste enthalten keine unnötigen Ursprungsquellen-Namen, Feed-URLs oder internen Fetch-/Debug-Informationen. Rechtlich verpflichtende Attribution darf nicht entfallen; bei Konflikt keine öffentliche Veröffentlichung.
+- Quellen-/Artwork-Lizenzen sowie die Rechte für den vorgesehenen privaten Empfängerkreis sind vor der Datenfreigabe zu prüfen.
 - Keine täglichen Jobs oder Veröffentlichungen ohne separate Freigabe; Fehler dürfen niemals den letzten gültigen EPG überschreiben.
 
 Die Architektur wird schrittweise implementiert, unabhängig vom derzeitigen Pilot-XCMate `0.1.29.97`.
+
+## Entwicklungsbranch: inkrementeller Agent
+
+Der eigenständige Python-Backend-Kern, synthetische CLI und Offline-Tests sind implementiert.
+Aufruf und Grenzen: [Entwicklungsstand](docs/DEVELOPMENT_DE.md).
+Der Standardlauf nutzt keine echten Daten, kein Secret und kein Netzwerk:
+
+```sh
+python3 -m unittest discover -s tests -v
+python3 -m xcmate_epg --state work/private/state.sqlite --output work/demo
+```
+
+**Entwicklungsintegration:** Der Quellcode kann nach geprüften Offline-Tests auf `main` übernommen werden. Das ist ausdrücklich **keine** Veröffentlichung von EPG-Nutzdaten und keine Aktivierung des 24-Stunden-Produktionslaufs.
+Die synthetische Standard-CLI bleibt erhalten; der vollständige private Import ist ein eigener,
+explizit autorisierter One-shot-Befehl. Authentifizierte TMDB-Live-Ergebnisse werden erst
+nach tatsächlichen erfolgreichen Abrufen ausgewiesen.
+
+## Produktivfreigabe – Stand 19.11.2026
+
+Der Eigentümer hat die technische Inbetriebnahme des privaten EPG-Agenten und den 24-Stunden-Betrieb ausdrücklich angefordert. Der produktive Datenkanal bleibt bis zur tatsächlich erfolgreichen Wiederherstellung des geschützten Arbeitsstands, Quellen-/Verteilrechtsprüfung, geprüftem echten 3-Quellen-Export, GitHub-Remote-Readback und Kodi-Geräteprüfung auf `PRIVATE_PENDING`. Ein Secret-Smoke oder synthetischer Test ist keine Produktionsfreigabe. Siehe [Live-Gate](docs/PRIVATE_GO_LIVE_GATE_2026-11-19_DE.md) und [Tageslauf](docs/ISSUE498_PRIVATE_DAILY_DE.md).
