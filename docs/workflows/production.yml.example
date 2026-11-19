@@ -13,11 +13,13 @@ concurrency:
   cancel-in-progress: false
 jobs:
   aggregate:
-    if: false # explicit release gate; no real source command provided
+    if: false # separate production authorization required
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - run: echo 'Activation requires reviewed implementation and release approval'
-# Later: restore protected last-good state, validate, persist atomically,
-# then separately approve Pages deployment. No Pages/deploy permissions here.
-# TMDB_READ_ACCESS_TOKEN may only be injected into a trusted protected job.
+      - run: echo 'Protected persistent storage and private delivery approval required'
+# Future trusted runner: restore private snapshots and state before invoking
+# python -m xcmate_epg.daily with owner-only configuration, source rights and
+# a persistent state path. Require separate authorization before adding
+# --authorize-network, enabling this job or configuring the 24-hour trigger.
+# See docs/ISSUE498_PRIVATE_DAILY_DE.md. Keep private data outside public CI.

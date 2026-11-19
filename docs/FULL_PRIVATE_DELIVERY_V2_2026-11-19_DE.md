@@ -1,5 +1,7 @@
 # EPG Agent – erster vollständiger Privatbetrieb (GitHub-only)
 
+> Historischer Schema-2-Entwurf. Backend #12 und Kodi #499 definieren die aktuelle Ein-Datei-Auslieferung mit Schema 3. [Aktueller Liefervertrag](ISSUE498_PRIVATE_DAILY_DE.md)
+
 **Nutzerentscheidung 19.11.2026: keine Teil-/Demo-V1.** Auslieferung erst nach vollständiger Verarbeitung der drei XMLTV-Quellen, verifizierter privater Senderkatalog-Zuordnung, aller verfügbaren Bildrollen und Senderlogos. Kodi-Provider-EPG und existierende Bildanzeige dürfen nicht schlechter werden. Kein eigener GS-Media-Server.
 
 ## Zustandsabgleich

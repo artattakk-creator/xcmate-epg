@@ -15,6 +15,25 @@ def event(): return ET.fromstring('<programme channel="s:one" start="20261117100
 
 
 class FullExportTests(unittest.TestCase):
+    def test_export_rejects_untrusted_standard_image_inputs(self):
+        from xml.etree import ElementTree as ET
+        from xcmate_epg.full_export import publish_stream
+
+        fixtures = (
+            ('clearlogo', 'https://image.tmdb.org/p.jpg', 'INVALID_XMLTV_IMAGE_ATTRIBUTES'),
+            ('poster', 'https://images.example.invalid/p.jpg', 'image policy violation'),
+            ('poster', 'https://image.tmdb.org/' + 'x' * 2048, 'INVALID_XMLTV_IMAGE_URL'),
+            ('poster', 'https://image.tmdb.org/p.jpg?token=fixture', 'image policy violation'),
+        )
+        for role, source, reason in fixtures:
+            with self.subTest(role=role, reason=reason), tempfile.TemporaryDirectory() as directory:
+                channel = ET.fromstring('<channel id="s:x"><display-name>Fixture</display-name></channel>')
+                event = ET.fromstring('<programme channel="s:x" start="20261119120000 +0000" '
+                                      'stop="20261119140000 +0000"><title>Fixture</title></programme>')
+                ET.SubElement(event, 'image', {'type': role}).text = source
+                with self.assertRaisesRegex(ValueError, reason):
+                    publish_stream([channel], [event], Path(directory))
+
     def test_deterministic_verified_export_and_replay(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d)
