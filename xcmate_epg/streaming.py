@@ -110,8 +110,13 @@ class StreamStore:
             sha,size=file_sha(path,self.limits.max_compressed_bytes)
             if old and old['fingerprint']==fingerprint and old['sha']==sha:
                 # Priority is an output policy, not a reason to reparse an identical source.
-                with self.db: self.db.execute('UPDATE full_sources SET priority=?,active=1 WHERE id=?',(priority,identifier))
-                return dict(json.loads(old['report']),cache_status='unchanged',successful=True)
+                report=json.loads(old['report'])
+                if 'time_fingerprint' not in report or 'channel_fingerprint' not in report:
+                    report.update(self._fingerprints(identifier,old['generation']))
+                with self.db:
+                    self.db.execute('UPDATE full_sources SET priority=?,active=1,report=? WHERE id=?',
+                                    (priority,json.dumps(report),identifier))
+                return dict(report,cache_status='unchanged',successful=True)
             # Old V2 pruning could leave orphan rows, even without source metadata.
             generation=1+max(self.db.execute('''SELECT COALESCE(MAX(generation),0) FROM (
                 SELECT generation FROM full_sources WHERE id=? UNION ALL
@@ -121,6 +126,7 @@ class StreamStore:
             with self.db:
                 report=self._parse(identifier,generation,path,size)
                 report.update(id=identifier,sha256=sha,cache_status='changed',successful=True)
+                report.update(self._fingerprints(identifier,generation))
                 self.db.execute('INSERT OR REPLACE INTO full_sources(id,generation,sha,fingerprint,priority,report) VALUES(?,?,?,?,?,?)',
                                 (identifier,generation,sha,fingerprint,priority,json.dumps(report)))
                 self.db.execute('DELETE FROM full_channels WHERE source=? AND generation!=?',(identifier,generation))
@@ -131,6 +137,20 @@ class StreamStore:
             if old and old['fingerprint']==fingerprint:
                 return dict(json.loads(old['report']),cache_status='lastgood',successful=False,error=code)
             raise SourceError(code) from None
+
+    def _fingerprints(self, identifier, generation):
+        channels=hashlib.sha256()
+        times=hashlib.sha256()
+        for row in self.db.execute('''SELECT payload FROM full_channels
+            WHERE source=? AND generation=? ORDER BY raw_id''',(identifier,generation)):
+            channels.update(row['payload'])
+            channels.update(b'\n')
+        for row in self.db.execute('''SELECT qualified_id,start,stop FROM full_programmes
+            WHERE source=? AND generation=? GROUP BY qualified_id,start,stop
+            ORDER BY qualified_id,start,stop''',(identifier,generation)):
+            times.update(json.dumps(tuple(row),ensure_ascii=False).encode('utf-8'))
+            times.update(b'\n')
+        return {'channel_fingerprint':channels.hexdigest(),'time_fingerprint':times.hexdigest()}
 
     def _parse(self, source, generation, path, compressed_size):
         limits=self.limits; started=time.monotonic()

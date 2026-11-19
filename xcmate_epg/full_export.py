@@ -12,6 +12,7 @@ from xml.etree import ElementTree as ET
 from xml.parsers import expat
 
 from .export import atomic
+from .streaming import file_sha
 from .xmltv import public_image, timestamp
 
 
@@ -25,13 +26,14 @@ def _copy_atomic(source,target):
         if os.path.exists(name): os.unlink(name)
 
 
-def verify_archive(path, *, image_hosts=None, max_xml_bytes=256*1024*1024, allow_empty=False,memory_check=lambda:None):
+def verify_archive(path, *, image_hosts=None, max_xml_bytes=256*1024*1024, allow_empty=False,
+                   memory_check=lambda:None, on_channel=None, on_programme=None, on_icon=None):
     """Independent gzip/Expat verifier: no XML tree, no entity expansion."""
     known=set(); counts={'channels':0,'programmes':0}; depth=0; title=False; has_title=False
-    expanded=0; in_programme=False
+    expanded=0; in_programme=False; item=None
     def reject(*args): raise ValueError('UNSAFE_EXPORT_XML')
     def start(tag,attrs):
-        nonlocal depth,title,has_title,in_programme
+        nonlocal depth,title,has_title,in_programme,item
         depth+=1
         if depth>32: reject()
         if depth==1 and tag!='tv': reject()
@@ -39,21 +41,30 @@ def verify_archive(path, *, image_hosts=None, max_xml_bytes=256*1024*1024, allow
             identifier=attrs.get('id')
             if not identifier or identifier in known: raise ValueError('INVALID_EXPORTED_CHANNEL')
             known.add(identifier); counts['channels']+=1
+            item=(identifier,'','')
+            if on_channel: on_channel(identifier)
         if depth==2 and tag=='programme':
             if attrs.get('channel') not in known: raise ValueError('DANGLING_EXPORTED_PROGRAMME')
             if timestamp(attrs.get('start',''))>=timestamp(attrs.get('stop','')): raise ValueError('INVALID_EXPORTED_TIME')
             counts['programmes']+=1; in_programme=True; has_title=False
+            item=(attrs['channel'],attrs['start'],attrs['stop'])
+            if on_programme: on_programme(attrs['channel'])
         if depth==3 and tag=='title' and in_programme: title=True
-        if tag=='icon': public_image(attrs.get('src',''),image_hosts)
+        if tag=='icon':
+            url=public_image(attrs.get('src',''),image_hosts)
+            if on_icon:
+                if depth!=3 or not item: reject()
+                on_icon(*item,url)
     def data(value):
         nonlocal has_title
         if title and value.strip(): has_title=True
     def end(tag):
-        nonlocal depth,title,in_programme
+        nonlocal depth,title,in_programme,item
         if depth==3 and tag=='title': title=False
         if depth==2 and tag=='programme':
             if not has_title: raise ValueError('MISSING_EXPORTED_TITLE')
             in_programme=False
+        if depth==2: item=None
         depth-=1
     parser=expat.ParserCreate(encoding='UTF-8'); parser.StartElementHandler=start
     parser.EndElementHandler=end; parser.CharacterDataHandler=data
@@ -188,6 +199,52 @@ def _sha_file(path):
     with Path(path).open('rb') as stream:
         for chunk in iter(lambda:stream.read(65536),b''): digest.update(chunk)
     return digest.hexdigest()
+
+
+def read_private_json(path, maximum=1024 * 1024):
+    with path.open('rb') as file:
+        data = file.read(maximum + 1)
+    if len(data) > maximum:
+        raise ValueError('DELIVERY_METADATA_LIMIT')
+    value = json.loads(data)
+    if not isinstance(value, dict):
+        raise ValueError('INVALID_DELIVERY_METADATA')
+    return value
+
+
+def read_run_manifest(root):
+    run = read_private_json(root / 'run-manifest.json')
+    generation, files = run.get('generation'), run.get('files')
+    if (not isinstance(generation, str) or not re.fullmatch(r'[a-f0-9]{64}', generation)
+            or run.get('directory') != f'runs/{generation}' or not isinstance(files, dict)
+            or hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest() != generation):
+        raise ValueError('INVALID_RUN_MANIFEST')
+    return run
+
+
+def verify_run_member(bundle, checksums, name, limit):
+    path = bundle / name
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise ValueError('INVALID_RUN_MEMBER')
+    digest, size = file_sha(path, limit)
+    if checksums.get(name) != digest:
+        raise ValueError('RUN_FILE_CHECKSUM_MISMATCH')
+    return path, digest, size
+
+
+def read_full_archive(bundle, checksums, limit):
+    full = read_private_json(verify_run_member(bundle, checksums, 'full/manifest.json', 65536)[0])
+    digest = full.get('sha256')
+    filename = 'xcmate-epg.xml.gz'
+    expected = f'versions/{digest}/{filename}'
+    if (not isinstance(digest, str) or not re.fullmatch(r'[a-f0-9]{64}', digest)
+            or full.get('view') != 'full' or full.get('file') != expected):
+        raise ValueError('INVALID_UNIVERSAL_MANIFEST')
+    archive, sha, size = verify_run_member(bundle, checksums, f'full/{expected}', limit)
+    if sha != digest or size != full.get('bytes'):
+        raise ValueError('UNIVERSAL_CHECKSUM_MISMATCH')
+    return archive, full
 
 
 def _verify_run_bundle(bundle,hashes,memory_check):

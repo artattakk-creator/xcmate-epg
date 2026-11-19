@@ -1,11 +1,11 @@
 # XCMate EPG Agent
 
-Zentraler, optionaler XMLTV-Dienst für **XCMate / Kodi**. Ziel: EPGShare01 und Kaimandura inkrementell zusammenführen, TV-Programme mit TMDB-/TVMaze-Artwork und rechtlich zulässigen Senderlogos ergänzen, validierte XMLTV-GZIP-Datei über GitHub Pages bereitstellen.
+Zentraler, optionaler XMLTV-Dienst für **XCMate / Kodi**. Er führt freigegebene XMLTV-Quellen inkrementell zusammen und ergänzt verifizierte Sendungsbilder und Senderlogos. Der geplante Kodi-Bezug verwendet ein separates privates GitHub-Repository.
 
-> **Status: privater V2-Probelauf, noch kein Produktivbetrieb.** Drei vollständige Quellen liefern 1.278 quellenqualifizierte Sendereinträge und 185.945 gültige Programme. Gerätezuordnung und Artwork bleiben `PARTIAL_COVERAGE / ARTWORK_BLOCKED`; der authentifizierte TMDB-Test ist in der aktuellen Instanz `TMDB_LIVE_PENDING`. Keine öffentliche EPG-Datei, Tagesjobs oder kostenpflichtigen Dienste.
+> **Status: PRIVATE_PENDING / PRODUCTION_DATA_NOT_APPROVED.** Der Tageslauf und der V2-Liefervertrag sind für synthetische Entwicklungstests verfügbar. Für den Produktivbetrieb stehen die separate Freigabe, der geschützte Restore und die Geräteabnahme aus.
 
-Vollimport, echte Bildnachweise und Grenzen: [Issue-6-Runbook](docs/ISSUE6_PRIVATE_FULL_DE.md),
-[aggregierte Abnahme](docs/issue6-acceptance.json), [Fortsetzung auf dem bestehenden Branch](docs/ISSUE6_HANDOFF_DE.md).
+Den lokalen Tageslauf, die eigenständige Profilableitung und den Git-Liefertest beschreibt [Issue #498](docs/ISSUE498_PRIVATE_DAILY_DE.md).
+Historische Vollimporte und Bildnachweise stehen im [Issue-6-Runbook](docs/ISSUE6_PRIVATE_FULL_DE.md).
 Alle tatsächlichen EPG-Daten, persönlichen Kataloge und Caches bleiben privat außerhalb von Git.
 
 ## Projektverknüpfungen
@@ -20,10 +20,8 @@ XCMate soll später unter **Einstellungen → EPG → XCMate EPG Agent** einen e
 
 | Repository | Zweck |
 |---|---|
-| `xcmate-epg` (hier) | Server-Agent, Quellenprüfung, Delta-XMLTV, Bild-/Logo-Zuordnung, Tests und Pages-Publikation |
+| `xcmate-epg` (hier) | Server-Agent, Quellenprüfung, Delta-XMLTV, Bild-/Logo-Zuordnung und lokaler Test des privaten V2-Liefervertrags |
 | `kodi-noodleprivate` | Kodi-Client, Aktivierungsschalter, EPG-Import, Source-ID-Mapping, UI und Android-Abnahme |
-
-Der geplante Downloadpfad lautet `https://artattakk-creator.github.io/xcmate-epg/xcmate-epg.xml.gz`; **er ist noch nicht veröffentlicht**.
 
 ## Kostenloser Ersttest
 
@@ -36,7 +34,7 @@ Die GitHub-Budgets bleiben auf 0 USD. Kein Budget erhöhen und keine kostenpflic
 - **Keine persönlichen Senderkataloge, Portaladressen, EPG-Zugangsdaten oder Backups** in dieses öffentliche Repository laden.
 - Der private Codex-Lauf verwendet ausschließlich die ausdrücklich autorisierte Runtime-Bindung von `TMDB_READ_ACCESS_TOKEN`. Persönliche HTTP-Secrets und GitHub-Repository-Secrets sind getrennt; Zugangsdaten werden nicht zwischen ihnen kopiert. Details und Live-Status stehen im Issue-6-Runbook.
 - TMDB-API-Anfragen verwenden den geheimen Bearer-Token; XMLTV-Bild-URLs dürfen **keinen** Token enthalten.
-- Quellen-/Artwork-Lizenzen und das Recht zur öffentlichen Weitergabe **vor** einer GitHub-Pages-Veröffentlichung prüfen.
+- Quellen-/Artwork-Lizenzen sowie die Rechte für den vorgesehenen privaten Empfängerkreis sind vor der Datenfreigabe zu prüfen.
 - Keine täglichen Jobs oder Veröffentlichungen ohne separate Freigabe; Fehler dürfen niemals den letzten gültigen EPG überschreiben.
 
 Die Architektur wird schrittweise implementiert, unabhängig vom derzeitigen Pilot-XCMate `0.1.29.97`.

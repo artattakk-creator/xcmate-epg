@@ -15,13 +15,19 @@ from .fetch import NoRedirect
 from .streaming import file_sha
 
 
+class SnapshotUnavailable(ValueError):
+    def __init__(self, http_status=None):
+        super().__init__('SOURCE_UNAVAILABLE_NO_VALID_SNAPSHOT')
+        self.http_status = http_status
+
+
 class SnapshotCache:
     def __init__(self,root,*,max_bytes=64*1024*1024,max_seconds=300,opener=None):
         self.root=Path(root); self.root.mkdir(parents=True,exist_ok=True,mode=0o700)
         self.max_bytes=max_bytes; self.max_seconds=max_seconds
         self.opener=opener or build_opener(NoRedirect).open
 
-    def fetch(self,identifier,url):
+    def _lookup(self, identifier, url):
         parts=urlsplit(url)
         if (not re.fullmatch(r'[A-Za-z0-9_-]+',identifier) or parts.scheme!='https'
                 or not parts.hostname or parts.port not in (None,443) or parts.username or parts.password or parts.query or parts.fragment):
@@ -30,14 +36,27 @@ class SnapshotCache:
         index=self.root/(identifier+'.json'); old=None
         try:
             candidate=json.loads(index.read_text())
-            if candidate['identity']==identity:
+            if (candidate['identity']==identity and isinstance(candidate['sha256'], str)
+                    and re.fullmatch(r'[a-f0-9]{64}', candidate['sha256'])
+                    and candidate['file']==f"{identifier}-{identity}-{candidate['sha256']}.bin"):
                 old_path=self.root/candidate['file']
                 # Do not trust an on-disk index to escape the private cache.
                 if (old_path.parent!=self.root or old_path.is_symlink()
                         or old_path.stat().st_nlink!=1): raise ValueError()
                 sha,size=file_sha(old_path,self.max_bytes)
-                if sha==candidate['sha256']: old=candidate
-        except (OSError,ValueError,KeyError): pass
+                if sha==candidate['sha256'] and size==candidate['compressed_bytes']: old=candidate
+        except (OSError,ValueError,KeyError,TypeError): pass
+        return identity, old
+
+    def replay(self, identifier, url):
+        _, old = self._lookup(identifier, url)
+        if not old:
+            raise SnapshotUnavailable()
+        return dict(old, id=identifier, path=str(self.root/old['file']), http_status=None,
+                    cache_status='replay', successful=True)
+
+    def fetch(self,identifier,url):
+        identity, old = self._lookup(identifier, url)
         headers={'User-Agent':'XCMateEPG/0.1 private-one-shot-preview'}
         if old:
             if old.get('etag'): headers['If-None-Match']=old['etag']
@@ -70,17 +89,20 @@ class SnapshotCache:
                 path=self.root/filename
                 if path.is_symlink() or (path.exists() and path.stat().st_nlink!=1):
                     raise ValueError('UNSAFE_CACHE_FILE')
-                os.replace(temporary,path); temporary=None; path.chmod(0o600)
+                unchanged = old is not None and old['sha256'] == sha
+                if not unchanged:
+                    os.replace(temporary,path); temporary=None; path.chmod(0o600)
                 h={k.lower():v for k,v in response.headers.items()}
                 return {'id':identifier,'identity':identity,'file':filename,'path':str(path),
                         'sha256':sha,'compressed_bytes':size,'etag':h.get('etag'),
-                        'modified':h.get('last-modified'),'http_status':200,'cache_status':'changed',
+                        'modified':h.get('last-modified'),'http_status':200,
+                        'cache_status':'unchanged' if unchanged else 'changed',
                         'successful':True}
         except (OSError,URLError,ValueError):
             if old:
                 return dict(old,id=identifier,path=str(self.root/old['file']),http_status=http_status,
                             cache_status='lastgood',successful=False,error='NETWORK_OR_DOWNLOAD_FAILURE')
-            raise ValueError('SOURCE_UNAVAILABLE_NO_VALID_SNAPSHOT') from None
+            raise SnapshotUnavailable(http_status) from None
         finally:
             if temporary and os.path.exists(temporary): os.unlink(temporary)
 
@@ -96,4 +118,7 @@ class SnapshotCache:
         sha,size=file_sha(path,self.max_bytes)
         if sha!=value['sha256']: raise ValueError('CACHE_CHECKSUM_MISMATCH')
         value['compressed_bytes']=size
-        atomic(self.root/(identifier+'.json'),(json.dumps(value,sort_keys=True)+'\n').encode())
+        index = self.root/(identifier+'.json')
+        payload = (json.dumps(value,sort_keys=True)+'\n').encode()
+        if not index.exists() or index.read_bytes() != payload:
+            atomic(index, payload)

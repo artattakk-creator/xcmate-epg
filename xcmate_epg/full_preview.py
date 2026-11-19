@@ -15,11 +15,11 @@ import tempfile
 from urllib.parse import urlsplit
 from xml.etree import ElementTree as ET
 
-from .artwork_selection import ArtworkSelections, PLACEHOLDER, event_key, local_choice, standard_image, validated_candidate
+from .artwork_selection import ArtworkSelections, PLACEHOLDER, digest, event_key, local_choice, standard_image, validated_candidate
 from .channel_mapping import build_mapping,persist_mapping
 from .export import atomic
 from .full_export import publish_stream,publish_run
-from .full_fetch import SnapshotCache
+from .full_fetch import SnapshotCache, SnapshotUnavailable
 from .private_preview import private_root
 from .state import State
 from .streaming import Limits,SourceError,StreamStore,memory_guard
@@ -30,7 +30,11 @@ class _NoArtwork:
     def enrich(self,channel,programme): return programme,[]
     def summary(self): return {'programmes_matched':0,'verified_images':0,'status':'ARTWORK_BLOCKED',
                               'tmdb_status':'NOT_CONFIGURED','tmdb_live_status':'TMDB_LIVE_PENDING',
-                              'tvmaze_status':'NOT_AUTHORIZED'}
+                              'tvmaze_status':'NOT_AUTHORIZED','api_attempts':0,'image_attempts':0}
+
+
+def _offline_transport(*args):
+    raise OSError('NETWORK_NOT_AUTHORIZED')
 
 
 def _url_safe(value,forbidden=()):
@@ -77,7 +81,7 @@ def clean_element(element,verified_urls,hosts,forbidden=()):
     return node,omitted
 
 
-def run_full(config,root,*,authorize_network=False,metadata=None):
+def run_full(config,root,*,authorize_network=False,metadata=None,replay=False):
     sources=config.get('sources')
     if not isinstance(sources,list) or not sources: raise ValueError('FULL_INPUT_REQUIRED')
     ids=[s.get('id') for s in sources]
@@ -86,19 +90,23 @@ def run_full(config,root,*,authorize_network=False,metadata=None):
     for source in sources:
         if ('path' in source)==('url' in source): raise ValueError('ONE_SOURCE_INPUT_REQUIRED')
         if 'channel_ids' in source: raise ValueError('FULL_IMPORT_FORBIDS_SUBSET')
-        if 'url' in source and not authorize_network: raise ValueError('NETWORK_NOT_AUTHORIZED')
+        if 'url' in source and not authorize_network and not replay: raise ValueError('NETWORK_NOT_AUTHORIZED')
     artwork_config=config.get('artwork',{})
-    if artwork_config.get('authorize_tvmaze') and not authorize_network:
+    if artwork_config.get('tmdb_secret_env') not in (None,'TMDB_READ_ACCESS_TOKEN'):
+        raise ValueError('ONLY_TMDB_RUNTIME_SECRET_ALLOWED')
+    if artwork_config.get('authorize_tvmaze') and not authorize_network and not replay:
         raise ValueError('ARTWORK_NETWORK_NOT_AUTHORIZED')
+    if replay and authorize_network:
+        raise ValueError('REPLAY_REQUIRES_OFFLINE')
     limits=Limits(**config.get('limits',{}))
     mask=os.umask(0o077)
     try:
         root=private_root(root)
-        return _run(config,root,limits,metadata,artwork_config,authorize_network)
+        return _run(config,root,limits,metadata,artwork_config,authorize_network,replay)
     finally: os.umask(mask)
 
 
-def _run(config,root,limits,metadata,artwork_config,authorize_network):
+def _run(config,root,limits,metadata,artwork_config,authorize_network,replay):
     reports=[]; forbidden=[s['url'] for s in config['sources'] if 'url' in s]
     hosts=IMAGE_HOSTS|set(artwork_config.get('approved_image_hosts',[]))
     cache=SnapshotCache(root/'snapshots',max_bytes=limits.max_compressed_bytes,max_seconds=limits.max_seconds)
@@ -107,24 +115,29 @@ def _run(config,root,limits,metadata,artwork_config,authorize_network):
             downloaded=None
             try:
                 if 'url' in source:
-                    downloaded=cache.fetch(source['id'],source['url']); path=downloaded['path']
+                    read = cache.replay if replay else cache.fetch
+                    downloaded=read(source['id'],source['url']); path=downloaded['path']
                 else: path=source['path']
                 report=spool.import_source(source['id'],path,source.get('priority',100),
                     identity=downloaded['identity'] if downloaded else None)
+                report['priority'] = source.get('priority',100)
                 if downloaded:
                     report['http_status']=downloaded['http_status']
-                    if report['successful']: cache.accept(downloaded)
+                    if report['successful'] and not replay: cache.accept(downloaded)
                     if not downloaded['successful']:
                         report.update(successful=False,cache_status='lastgood',error=downloaded['error'])
                 reports.append(report)
-            except (SourceError,ValueError,OSError):
-                reports.append({'id':source['id'],'successful':False,'cache_status':'missing','error':'SOURCE_UNAVAILABLE_OR_QUARANTINED'})
+            except (SourceError,ValueError,OSError) as error:
+                reports.append({'id':source['id'],'successful':False,'cache_status':'missing',
+                                'http_status':error.http_status if isinstance(error, SnapshotUnavailable) else None,
+                                'error':'SOURCE_UNAVAILABLE_OR_QUARANTINED'})
         # A run is complete only for its configured sources, never leftover database rows.
         spool.set_active_sources(s['id'] for s in config['sources'])
         if any(not r['successful'] for r in reports):
             result={'status':'SOURCE_BLOCKED','status_flags':['SOURCE_BLOCKED'],'sources':reports,
                     'real_sources_successful':sum(r['successful'] for r in reports),'previous_export_retained':(root/'full/manifest.json').exists()}
-            atomic(root/'blocked-report.json',(json.dumps(result,indent=2)+'\n').encode())
+            if not replay:
+                atomic(root/'blocked-report.json',(json.dumps(result,indent=2)+'\n').encode())
             return result
         mapping_input=config.get('mapping',{})
         if isinstance(mapping_input,dict) and mapping_input.get('path'):
@@ -140,14 +153,16 @@ def _run(config,root,limits,metadata,artwork_config,authorize_network):
         mapping['catalog_complete']=catalog_complete
         mapping['full_provider_denominator']=len(catalog) if catalog_complete else None
         with State(root/'artwork.sqlite') as state:
-            if metadata is None and (artwork_config.get('authorize_tvmaze') or artwork_config.get('tmdb_secret_env')
-                                     or artwork_config.get('tmdb_http_binding')
-                                     or (authorize_network and artwork_config.get('stable_selection') is True)):
+            if metadata is None and replay:
+                from .live_artwork import ArtworkEnricher
+                settings = dict(artwork_config, max_requests=0, max_image_requests=0)
+                metadata = ArtworkEnricher(state,settings,transport=_offline_transport)
+            elif metadata is None and authorize_network and (
+                    artwork_config.get('authorize_tvmaze') or artwork_config.get('tmdb_secret_env')
+                    or artwork_config.get('tmdb_http_binding') or artwork_config.get('stable_selection') is True):
                 from .live_artwork import ArtworkEnricher
                 from .tmdb_runtime import runtime_tmdb_client, TMDB_LIVE_PENDING
                 tmdb=None; env_name=artwork_config.get('tmdb_secret_env')
-                if env_name and env_name!='TMDB_READ_ACCESS_TOKEN':
-                    raise ValueError('ONLY_TMDB_RUNTIME_SECRET_ALLOWED')
                 # A runtime-secret variable must be explicitly named and authorized.
                 # No GitHub token retrieval, token file, CLI token or token serialization.
                 tmdb_live_status=TMDB_LIVE_PENDING
@@ -160,14 +175,21 @@ def _run(config,root,limits,metadata,artwork_config,authorize_network):
             try:
                 persist_mapping(mapping,stage/'mapping-review.json')
                 with spool.db:
-                    result=_render(config,stage,spool,channels,mapping,metadata,reports,hosts,forbidden,artwork_config)
-                    publish_run(stage,root,memory_check=lambda:memory_guard(limits))
+                    if replay:
+                        spool.db.execute('SAVEPOINT offline_render')
+                    result=_render(config,stage,spool,channels,mapping,metadata,reports,hosts,forbidden,artwork_config,
+                                   replay=replay)
+                    if replay:
+                        spool.db.execute('ROLLBACK TO offline_render')
+                        spool.db.execute('RELEASE offline_render')
+                    else:
+                        publish_run(stage,root,memory_check=lambda:memory_guard(limits))
                 return result
             finally:
                 shutil.rmtree(stage,ignore_errors=True)
 
 
-def _render(config,root,spool,channels,mapping,metadata,reports,hosts,forbidden,artwork_config):
+def _render(config,root,spool,channels,mapping,metadata,reports,hosts,forbidden,artwork_config,*,replay=False):
     guard=lambda:memory_guard(spool.limits)
     guard()
     horizon=config.get('horizon',{})
@@ -187,7 +209,7 @@ def _render(config,root,spool,channels,mapping,metadata,reports,hosts,forbidden,
         if qid not in channel_map or not logo.get('evidence') or logo.get('rights_reviewed') is not True:
             continue
         if not any(i.get('src')==url for i in channel_map[qid].findall('icon')): continue
-        verifier=getattr(metadata,'verify_media',None)
+        verifier=getattr(metadata,'verify_selection_media',None) or getattr(metadata,'verify_media',None)
         if not verifier: continue
         checked=verifier(url)
         if not checked.get('verified'): continue
@@ -217,6 +239,7 @@ def _render(config,root,spool,channels,mapping,metadata,reports,hosts,forbidden,
                     local_logos.setdefault(entry['qualified_id'], set()).add(asset)
     selected_counts = Counter()
     selections = None
+    incremental = stable and artwork_config.get('incremental_events') is True
     if stable:
         (root/PLACEHOLDER).parent.mkdir(parents=True, exist_ok=True)
         atomic(root/PLACEHOLDER, standard_image())
@@ -225,7 +248,13 @@ def _render(config,root,spool,channels,mapping,metadata,reports,hosts,forbidden,
         selections = ArtworkSelections(spool.db, selection_hosts, forbidden, verifier,
                                        artwork_config.get('manual_images', {}),
                                        artwork_config.get('confirmed_invalid_images', {}),
-                                       artwork_config.get('manual_titles', {}))
+                                       artwork_config.get('manual_titles', {}),
+                                       upgrade_fallbacks=artwork_config.get('upgrade_fallbacks') is True)
+    cached_events = None
+    if incremental:
+        cached_events = _EventEnrichmentCache(spool.db, artwork_config, channel_map, hosts, forbidden)
+        cached_events.prune(lower)
+    reused_events = 0
     selection_path = root/'artwork-selection.jsonl'
     provenance_temp=root/'.source-media.pending'; artwork_temp=root/'.artwork.pending'
     selection_output = selection_path.open('w', encoding='utf-8') if stable else nullcontext()
@@ -242,7 +271,7 @@ def _render(config,root,spool,channels,mapping,metadata,reports,hosts,forbidden,
                 omissions[item['reason']]+=1
                 provenance.write(json.dumps({'source':row['source'],'channel':qid,**item},ensure_ascii=False)+'\n')
         for record in logo_records: sidecar.write(json.dumps(record,ensure_ascii=False)+'\n')
-        with (nullcontext() if stable else spool.db):
+        with (nullcontext() if stable or replay else spool.db):
             spool.db.execute('DROP TABLE IF EXISTS rendered_events')
             spool.db.execute('CREATE TABLE rendered_events(source TEXT,channel TEXT,start REAL,stop REAL,fingerprint TEXT PRIMARY KEY,payload BLOB)')
             if selections:
@@ -254,6 +283,7 @@ def _render(config,root,spool,channels,mapping,metadata,reports,hosts,forbidden,
                 original = row['element']
                 lookup = original
                 kwargs = {}
+                cached = None
                 if selections:
                     key = event_key(row)
                     previous = selections.previous(key)
@@ -263,10 +293,20 @@ def _render(config,root,spool,channels,mapping,metadata,reports,hosts,forbidden,
                     if title:
                         lookup = copy.deepcopy(original)
                         lookup.find('title').text = title
+                    collect_images = first_variant and selections.needs_candidates(key, previous, title)
                     if hasattr(metadata, 'enrich_with_selection'):
-                        kwargs['collect_images'] = first_variant and selections.needs_candidates(key, previous, title)
-                enrich = metadata.enrich_with_selection if kwargs else metadata.enrich
-                event,records=enrich(channel_map[row['qualified_id']],lookup,**kwargs)
+                        kwargs['collect_images'] = collect_images
+                    if cached_events and not collect_images:
+                        cached = cached_events.get(row)
+                if cached:
+                    event, records = cached
+                    reused_events += 1
+                else:
+                    enrich = metadata.enrich_with_selection if kwargs else metadata.enrich
+                    event,records=enrich(channel_map[row['qualified_id']],lookup,**kwargs)
+                cache_payload = None
+                if cached_events and not replay and not cached and getattr(metadata, 'last_metadata', True):
+                    cache_payload = ET.tostring(event, encoding='utf-8')
                 if lookup is not original:
                     for node in event.findall('title'):
                         event.remove(node)
@@ -294,6 +334,8 @@ def _render(config,root,spool,channels,mapping,metadata,reports,hosts,forbidden,
                                          if 'selected_url' in item)
                     for url in urls:
                         ET.SubElement(event, 'icon', {'src': url})
+                    if cache_payload is not None and decisions and all('selected_url' in item for item in decisions.values()):
+                        cached_events.put(row, cache_payload, records)
                     if first_variant:
                         selected_counts.update(item['selected_provider'] for item in decisions.values())
                         selected.write(json.dumps({
@@ -431,9 +473,39 @@ def _render(config,root,spool,channels,mapping,metadata,reports,hosts,forbidden,
             provider: selected_counts[provider]
             for provider in ('manual', 'tmdb', 'tvmaze', 'xmltv', 'logo', 'placeholder')
         }
+    if incremental:
+        report['artwork']['unchanged_enriched_events_reused'] = reused_events
     guard()
     atomic(root/'quality-report.json',(json.dumps(report,sort_keys=True,indent=2)+'\n').encode())
     return report
+
+
+class _EventEnrichmentCache:
+    def __init__(self, db, policy, channels, hosts, forbidden):
+        self.db = db
+        self.policy = digest([1, policy, sorted(hosts), sorted(forbidden)])
+        self.channels = {key: hashlib.sha256(ET.tostring(node)).hexdigest()
+                         for key, node in channels.items()}
+        db.execute('''CREATE TABLE IF NOT EXISTS enriched_events (
+            source TEXT, fingerprint TEXT, policy TEXT, channel TEXT, stop REAL,
+            xml BLOB, records TEXT, PRIMARY KEY (source, fingerprint)) WITHOUT ROWID''')
+
+    def prune(self, lower):
+        self.db.execute('''DELETE FROM enriched_events AS e WHERE stop<=? OR policy!=?
+            OR NOT EXISTS (SELECT 1 FROM full_sources AS s JOIN full_programmes AS p
+                            ON p.source=s.id AND p.generation=s.generation
+                            WHERE s.id=e.source AND p.fingerprint=e.fingerprint)''', (lower, self.policy))
+
+    def get(self, row):
+        saved = self.db.execute('''SELECT xml,records FROM enriched_events
+            WHERE source=? AND fingerprint=? AND policy=? AND channel=?''',
+            (row['source'], row['fingerprint'], self.policy, self.channels[row['qualified_id']])).fetchone()
+        return (ET.fromstring(saved['xml']), json.loads(saved['records'])) if saved else None
+
+    def put(self, row, payload, records):
+        self.db.execute('INSERT OR REPLACE INTO enriched_events VALUES (?,?,?,?,?,?,?)',
+            (row['source'], row['fingerprint'], self.policy, self.channels[row['qualified_id']],
+             row['stop'], payload, json.dumps(records, ensure_ascii=False)))
 
 
 def main():

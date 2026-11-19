@@ -71,13 +71,20 @@ def validated_candidate(record, hosts, forbidden):
         role = 'poster' if type(width) is int and type(height) is int and height > width else 'backdrop'
     if role not in ROLES or not fits(role, width, height):
         return None
-    return {'selected_provider': provider, 'selected_role': role, 'selected_url': url,
+    choice = {'selected_provider': provider, 'selected_role': role, 'selected_url': url,
             'provider_id': record.get('provider_id'), 'width': width, 'height': height,
             'attribution': record.get('attribution'), 'sha256': record.get('sha256'),
             'mime_type': record.get('mime_type'), 'size_bytes': record.get('size_bytes'),
             'validation': 'verified_image_structure',
             'confidence': 'confirmed' if provider == 'manual' else
                           'source_declared' if provider == 'xmltv' else 'verified_match'}
+    if record.get('scope'):
+        choice['scope'] = record['scope']
+    elif role == 'episode_still':
+        choice['scope'] = 'episode'
+    if record.get('evidence'):
+        choice['evidence_sha256'] = digest(record['evidence'])
+    return choice
 
 
 def local_choice(logo=None):
@@ -88,7 +95,8 @@ def local_choice(logo=None):
 
 
 class ArtworkSelections:
-    def __init__(self, db, hosts, forbidden, verifier, overrides, invalidations, titles):
+    def __init__(self, db, hosts, forbidden, verifier, overrides, invalidations, titles,
+                 *, upgrade_fallbacks=False):
         self.db = db
         self.hosts = hosts
         self.forbidden = forbidden
@@ -96,6 +104,7 @@ class ArtworkSelections:
         self.overrides = overrides
         self.invalidations = invalidations
         self.titles = titles
+        self.upgrade_fallbacks = upgrade_fallbacks
         db.execute('''CREATE TABLE IF NOT EXISTS artwork_selections (
             event_key TEXT PRIMARY KEY, stop REAL NOT NULL, decisions BLOB NOT NULL)''')
 
@@ -130,6 +139,7 @@ class ArtworkSelections:
     def needs_candidates(self, key, previous, title):
         return not previous or any(self._blocked(old) or self._new_title(title, old)
                                    or self._confirmed_defect(key, role, old)
+                                   or (self.upgrade_fallbacks and not old.get('selected_url'))
                                    for role, old in previous.items())
 
     def select(self, key, stop, previous, records, logo, title):
@@ -143,7 +153,8 @@ class ArtworkSelections:
             logo_missing = old and old['selected_provider'] == 'logo' and old.get('local_ref') != logo
             replace = old and self._confirmed_defect(key, role, old)
             title_changed = old and self._new_title(title, old)
-            if selection is None and old and not (replace or policy_blocked or title_changed or logo_missing):
+            upgrade = self.upgrade_fallbacks and old and not old.get('selected_url')
+            if selection is None and old and not (replace or policy_blocked or title_changed or logo_missing or upgrade):
                 decisions[role] = old
                 continue
             reason = 'manual_override' if selection else 'verified_candidate'
@@ -151,11 +162,12 @@ class ArtworkSelections:
                 available = [item for item in candidates if item['selected_role'] in preferences
                              and item['selected_provider'] in PROVIDERS
                              and (not (replace or policy_blocked) or item['selected_url'] != old['selected_url'])]
-                selection = None if logo_missing and not title_changed else min(available, key=lambda item: (
+                selection = None if logo_missing and not (title_changed or upgrade) else min(available, key=lambda item: (
                     PROVIDERS.index(item['selected_provider']),
                     preferences.index(item['selected_role']), item['selected_url'],
                     digest(item)), default=None)
-                if selection is None and title_changed and not (replace or policy_blocked):
+                if (selection is None and (title_changed or (upgrade and not logo_missing))
+                        and not (replace or policy_blocked)):
                     decisions[role] = old
                     continue
                 if selection is None:
