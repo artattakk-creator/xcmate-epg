@@ -2,7 +2,7 @@
 
 Zentraler, optionaler XMLTV-Dienst für **XCMate / Kodi**. Er führt freigegebene XMLTV-Quellen inkrementell zusammen und ergänzt verifizierte Sendungsbilder und Senderlogos. Der geplante Kodi-Bezug verwendet ein separates privates GitHub-Repository.
 
-> **Status: PRIVATE_PENDING / PRODUCTION_DATA_NOT_APPROVED.** Der Tageslauf und der V2-Liefervertrag sind für synthetische Entwicklungstests verfügbar. Für den Produktivbetrieb stehen die separate Freigabe, der geschützte Restore und die Geräteabnahme aus.
+> **Status: PRIVATE_PENDING / PRODUCTION_DATA_NOT_APPROVED.** Der Tageslauf und der Schema-3-Liefervertrag sind für synthetische Entwicklungstests verfügbar. Für den Produktivbetrieb stehen die separate Freigabe, der geschützte Restore und die Geräteabnahme aus.
 
 Den lokalen Tageslauf, die eigenständige Profilableitung und den Git-Liefertest beschreibt [Issue #498](docs/ISSUE498_PRIVATE_DAILY_DE.md).
 Historische Vollimporte und Bildnachweise stehen im [Issue-6-Runbook](docs/ISSUE6_PRIVATE_FULL_DE.md).
@@ -20,7 +20,7 @@ XCMate soll später unter **Einstellungen → EPG → XCMate EPG Agent** einen e
 
 | Repository | Zweck |
 |---|---|
-| `xcmate-epg` (hier) | Server-Agent, Quellenprüfung, Delta-XMLTV, Bild-/Logo-Zuordnung und lokaler Test des privaten V2-Liefervertrags |
+| `xcmate-epg` (hier) | Server-Agent, Quellenprüfung, Delta-XMLTV, Bild-/Logo-Zuordnung und lokaler Test des privaten XMLTV-Liefervertrags |
 | `kodi-noodleprivate` | Kodi-Client, Aktivierungsschalter, EPG-Import, Source-ID-Mapping, UI und Android-Abnahme |
 
 ## Kostenloser Ersttest

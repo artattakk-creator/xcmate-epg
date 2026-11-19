@@ -8,6 +8,7 @@ import zlib
 
 from .artwork import title_key
 from .xmltv import public_image
+from .xmltv_images import STANDARD_ROLES
 
 PROVIDERS = ('tmdb', 'tvmaze', 'xmltv')
 ROLES = {
@@ -15,6 +16,7 @@ ROLES = {
     'poster': ('poster', 'episode_still', 'backdrop'),
     'episode_still': ('episode_still', 'backdrop', 'poster'),
 }
+UNIVERSAL_ROLES = {role: (role,) for role in STANDARD_ROLES}
 PLACEHOLDER = 'assets/artwork/standard.png'
 LOG = logging.getLogger(__name__)
 
@@ -69,7 +71,12 @@ def validated_candidate(record, hosts, forbidden):
     width, height = record.get('width'), record.get('height')
     if provider == 'xmltv' and role == 'unclassified_source_image':
         role = 'poster' if type(width) is int and type(height) is int and height > width else 'backdrop'
-    if role not in ROLES or not fits(role, width, height):
+    role = {'still': 'episode_still', 'fanart': 'backdrop'}.get(role, role)
+    if role in ('person', 'character'):
+        accepted = type(width) is int and type(height) is int and min(width, height) >= 64
+    else:
+        accepted = role in ROLES and fits(role, width, height)
+    if not accepted:
         return None
     choice = {'selected_provider': provider, 'selected_role': role, 'selected_url': url,
             'provider_id': record.get('provider_id'), 'width': width, 'height': height,
@@ -96,7 +103,7 @@ def local_choice(logo=None):
 
 class ArtworkSelections:
     def __init__(self, db, hosts, forbidden, verifier, overrides, invalidations, titles,
-                 *, upgrade_fallbacks=False):
+                 *, upgrade_fallbacks=False, universal=False):
         self.db = db
         self.hosts = hosts
         self.forbidden = forbidden
@@ -105,11 +112,14 @@ class ArtworkSelections:
         self.invalidations = invalidations
         self.titles = titles
         self.upgrade_fallbacks = upgrade_fallbacks
-        db.execute('''CREATE TABLE IF NOT EXISTS artwork_selections (
+        self.roles = UNIVERSAL_ROLES if universal else ROLES
+        self.table = 'universal_artwork_selections' if universal else 'artwork_selections'
+        self.universal = universal
+        db.execute(f'''CREATE TABLE IF NOT EXISTS {self.table} (
             event_key TEXT PRIMARY KEY, stop REAL NOT NULL, decisions BLOB NOT NULL)''')
 
     def prune(self, earliest_retained_end):
-        self.db.execute('DELETE FROM artwork_selections WHERE stop<=?', (earliest_retained_end,))
+        self.db.execute(f'DELETE FROM {self.table} WHERE stop<=?', (earliest_retained_end,))
 
     def title_override(self, key):
         override = self.titles.get(key, {})
@@ -120,7 +130,7 @@ class ArtworkSelections:
 
     def previous(self, key):
         previous_row = self.db.execute(
-            'SELECT decisions FROM artwork_selections WHERE event_key=?', (key,)).fetchone()
+            f'SELECT decisions FROM {self.table} WHERE event_key=?', (key,)).fetchone()
         return json.loads(zlib.decompress(previous_row[0])) if previous_row else {}
 
     def _confirmed_defect(self, key, role, old):
@@ -137,16 +147,18 @@ class ArtworkSelections:
                 and old['selected_provider'] != 'manual')
 
     def needs_candidates(self, key, previous, title):
+        retry_fallbacks = (self.upgrade_fallbacks and
+                           (not self.universal or not any(old.get('selected_url') for old in previous.values())))
         return not previous or any(self._blocked(old) or self._new_title(title, old)
                                    or self._confirmed_defect(key, role, old)
-                                   or (self.upgrade_fallbacks and not old.get('selected_url'))
+                                   or (retry_fallbacks and not old.get('selected_url'))
                                    for role, old in previous.items())
 
     def select(self, key, stop, previous, records, logo, title):
         candidates = [value for record in records
                       if (value := validated_candidate(record, self.hosts, self.forbidden))]
         decisions = {}
-        for role, preferences in ROLES.items():
+        for role, preferences in self.roles.items():
             old = previous.get(role)
             selection = self._manual(key, role, old)
             policy_blocked = old and self._blocked(old)
@@ -186,7 +198,7 @@ class ArtworkSelections:
             LOG.info('ARTWORK_SELECTED event=%s role=%s source=%s reason=%s cache=miss generation=%s',
                      key, role, selection['selected_provider'], reason, selection['generation'])
         if decisions != previous:
-            self.db.execute('INSERT OR REPLACE INTO artwork_selections VALUES (?,?,?)',
+            self.db.execute(f'INSERT OR REPLACE INTO {self.table} VALUES (?,?,?)',
                             (key, stop, zlib.compress(json.dumps(decisions, sort_keys=True).encode())))
         return decisions
 

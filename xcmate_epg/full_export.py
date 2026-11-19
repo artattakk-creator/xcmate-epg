@@ -13,7 +13,8 @@ from xml.parsers import expat
 
 from .export import atomic
 from .streaming import file_sha
-from .xmltv import public_image, timestamp
+from .xmltv import timestamp
+from .xmltv_images import MAX_IMAGE_URL, MAX_MEDIA_PER_EVENT, image_url, validate_image_attrs
 
 
 def _copy_atomic(source,target):
@@ -27,59 +28,114 @@ def _copy_atomic(source,target):
 
 
 def verify_archive(path, *, image_hosts=None, max_xml_bytes=256*1024*1024, allow_empty=False,
-                   memory_check=lambda:None, on_channel=None, on_programme=None, on_icon=None):
+                   memory_check=lambda:None, on_channel=None, on_programme=None, on_icon=None,
+                   on_image=None, on_times=None):
     """Independent gzip/Expat verifier: no XML tree, no entity expansion."""
-    known=set(); counts={'channels':0,'programmes':0}; depth=0; title=False; has_title=False
-    expanded=0; in_programme=False; item=None
-    def reject(*args): raise ValueError('UNSAFE_EXPORT_XML')
-    def start(tag,attrs):
-        nonlocal depth,title,has_title,in_programme,item
-        depth+=1
-        if depth>32: reject()
-        if depth==1 and tag!='tv': reject()
-        if depth==2 and tag=='channel':
-            identifier=attrs.get('id')
-            if not identifier or identifier in known: raise ValueError('INVALID_EXPORTED_CHANNEL')
-            known.add(identifier); counts['channels']+=1
-            item=(identifier,'','')
-            if on_channel: on_channel(identifier)
-        if depth==2 and tag=='programme':
-            if attrs.get('channel') not in known: raise ValueError('DANGLING_EXPORTED_PROGRAMME')
-            if timestamp(attrs.get('start',''))>=timestamp(attrs.get('stop','')): raise ValueError('INVALID_EXPORTED_TIME')
-            counts['programmes']+=1; in_programme=True; has_title=False
-            item=(attrs['channel'],attrs['start'],attrs['stop'])
-            if on_programme: on_programme(attrs['channel'])
-        if depth==3 and tag=='title' and in_programme: title=True
-        if tag=='icon':
-            url=public_image(attrs.get('src',''),image_hosts)
-            if on_icon:
-                if depth!=3 or not item: reject()
-                on_icon(*item,url)
+    known = set()
+    counts = {'channels': 0, 'programmes': 0}
+    depth = expanded = 0
+    item = None
+    title = has_title = in_programme = False
+    image_attrs = image_text = None
+    image_size = image_count = icon_count = 0
+
+    def reject(*args):
+        raise ValueError('UNSAFE_EXPORT_XML')
+
+    def start(tag, attrs):
+        nonlocal depth, title, has_title, in_programme, item
+        nonlocal image_attrs, image_text, image_size, image_count, icon_count
+        depth += 1
+        if depth > 32 or image_text is not None:
+            reject()
+        if depth == 1 and tag != 'tv':
+            reject()
+        if depth == 2:
+            image_count = icon_count = 0
+        if depth == 2 and tag == 'channel':
+            identifier = attrs.get('id')
+            if not identifier or identifier in known:
+                raise ValueError('INVALID_EXPORTED_CHANNEL')
+            known.add(identifier)
+            counts['channels'] += 1
+            item = (identifier, '', '')
+            if on_channel:
+                on_channel(identifier)
+        if depth == 2 and tag == 'programme':
+            if attrs.get('channel') not in known:
+                raise ValueError('DANGLING_EXPORTED_PROGRAMME')
+            begin, end_time = timestamp(attrs.get('start', '')), timestamp(attrs.get('stop', ''))
+            if begin >= end_time:
+                raise ValueError('INVALID_EXPORTED_TIME')
+            counts['programmes'] += 1
+            in_programme, has_title = True, False
+            item = (attrs['channel'], attrs['start'], attrs['stop'])
+            if on_programme:
+                on_programme(attrs['channel'])
+            if on_times:
+                on_times(begin, end_time)
+        if depth == 3 and tag == 'title' and in_programme:
+            title = True
+        if tag == 'icon':
+            url = image_url(attrs.get('src', ''), image_hosts)
+            if depth == 3 and item:
+                icon_count += 1
+                if icon_count > MAX_MEDIA_PER_EVENT:
+                    raise ValueError('XMLTV_ICON_LIMIT')
+                if on_icon:
+                    on_icon(*item, url)
+            elif on_icon:
+                reject()
+        if tag == 'image':
+            if depth != 3 or not in_programme:
+                reject()
+            image_count += 1
+            if image_count > MAX_MEDIA_PER_EVENT:
+                raise ValueError('XMLTV_IMAGE_LIMIT')
+            validate_image_attrs(attrs)
+            image_attrs, image_text, image_size = attrs, [], 0
+
     def data(value):
-        nonlocal has_title
-        if title and value.strip(): has_title=True
+        nonlocal has_title, image_size
+        if title and value.strip():
+            has_title = True
+        if image_text is not None:
+            image_size += len(value)
+            if image_size > MAX_IMAGE_URL:
+                raise ValueError('INVALID_XMLTV_IMAGE_URL')
+            image_text.append(value)
+
     def end(tag):
-        nonlocal depth,title,in_programme,item
-        if depth==3 and tag=='title': title=False
-        if depth==2 and tag=='programme':
-            if not has_title: raise ValueError('MISSING_EXPORTED_TITLE')
-            in_programme=False
-        if depth==2: item=None
-        depth-=1
-    parser=expat.ParserCreate(encoding='UTF-8'); parser.StartElementHandler=start
-    parser.EndElementHandler=end; parser.CharacterDataHandler=data
-    parser.StartDoctypeDeclHandler=reject; parser.EntityDeclHandler=reject; parser.ExternalEntityRefHandler=reject
-    with gzip.open(path,'rb') as stream:
-        while True:
+        nonlocal depth, title, in_programme, item, image_text, image_attrs
+        if image_text is not None:
+            url = image_url(''.join(image_text).strip(), image_hosts)
+            if on_image:
+                on_image(*item, url, image_attrs)
+            image_text = image_attrs = None
+        if depth == 3 and tag == 'title':
+            title = False
+        if depth == 2 and tag == 'programme':
+            if not has_title:
+                raise ValueError('MISSING_EXPORTED_TITLE')
+            in_programme = False
+        if depth == 2:
+            item = None
+        depth -= 1
+
+    parser = expat.ParserCreate(encoding='UTF-8')
+    parser.StartElementHandler, parser.EndElementHandler, parser.CharacterDataHandler = start, end, data
+    parser.StartDoctypeDeclHandler = parser.EntityDeclHandler = parser.ExternalEntityRefHandler = reject
+    with gzip.open(path, 'rb') as stream:
+        while chunk := stream.read(65536):
             memory_check()
-            chunk=stream.read(65536)
-            if not chunk: break
-            expanded+=len(chunk)
-            if expanded>max_xml_bytes: raise ValueError('OUTPUT_XML_LIMIT')
-            parser.Parse(chunk,False)
-        parser.Parse(b'',True)
-    if not allow_empty and (not counts['channels'] or not counts['programmes']): raise ValueError('EMPTY_FULL_EXPORT')
-    return dict(counts,xml_bytes=expanded)
+            expanded += len(chunk)
+            if expanded > max_xml_bytes:
+                raise ValueError('OUTPUT_XML_LIMIT')
+            parser.Parse(chunk, False)
+        parser.Parse(b'', True)
+    if not allow_empty and (not counts['channels'] or not counts['programmes']):
+        raise ValueError('EMPTY_FULL_EXPORT')
+    return dict(counts, xml_bytes=expanded)
 
 
 class _CompressedSink:
@@ -109,13 +165,23 @@ def publish_stream(channels,programmes,directory,*,status='PARTIAL_COVERAGE',vie
         for icon in node.iter('icon'):
             if set(icon.attrib)-{'src','width','height'} or len(icon) or (icon.text or '').strip():
                 raise ValueError('INVALID_EXPORTED_ICON')
-            public_image(icon.get('src',''),image_hosts)
+            image_url(icon.get('src',''), image_hosts)
+        for image in node.iter('image'):
+            if node.tag != 'programme' or image not in list(node) or len(image):
+                raise ValueError('INVALID_EXPORTED_IMAGE')
+            validate_image_attrs(image.attrib)
+            image.text = image_url((image.text or '').strip(), image_hosts)
         payload=ET.tostring(node,encoding='utf-8')
         if len(payload)>2*1024*1024: raise ValueError('EXPORT_RECORD_LIMIT')
         if any(value in payload for value in forbidden): raise ValueError('PRIVATE_SOURCE_OR_CREDENTIAL_IN_EXPORT')
         if re.search(rb'Bearer\s|(?:password|token|api_key|username)\s*[:=]',payload,re.I):
             raise ValueError('CREDENTIAL_PATTERN_IN_EXPORT')
         return payload
+    programme_order = ('title sub-title desc credits date category keyword language orig-language '
+                       'length icon url country episode-num video audio previously-shown premiere '
+                       'last-chance new subtitles rating star-rating review image').split()
+    programme_ranks = {name: index for index, name in enumerate(programme_order)}
+    channel_ranks = {'display-name': 0, 'icon': 1, 'url': 2}
     try:
         with archive.open('wb') as raw:
             sink=_CompressedSink(raw,max_gzip_bytes)
@@ -130,6 +196,7 @@ def publish_stream(channels,programmes,directory,*,status='PARTIAL_COVERAGE',vie
                     identifier=node.get('id')
                     if not identifier or identifier in known: raise ValueError('DUPLICATE_EXPORTED_CHANNEL')
                     known.add(identifier); expected['channels']+=1
+                    node[:]=sorted(node,key=lambda child:channel_ranks.get(child.tag,len(channel_ranks)))
                     write(validate_node(node)+b'\n')
                 for node in programmes:
                     if node.get('channel') not in known or not (node.findtext('title') or '').strip():
@@ -137,9 +204,7 @@ def publish_stream(channels,programmes,directory,*,status='PARTIAL_COVERAGE',vie
                     if timestamp(node.get('start',''))>=timestamp(node.get('stop','')):
                         raise ValueError('INVALID_EXPORTED_TIME')
                     # XMLTV field ordering, preserving all repeated metadata fields.
-                    names='title sub-title desc credits date category keyword language orig-language length icon url country episode-num video audio previously-shown premiere last-chance new subtitles rating star-rating review'.split()
-                    ranks={name:i for i,name in enumerate(names)}
-                    node[:]=sorted(node,key=lambda child:ranks.get(child.tag,len(ranks)))
+                    node[:]=sorted(node,key=lambda child:programme_ranks.get(child.tag,len(programme_ranks)))
                     expected['programmes']+=1; write(validate_node(node)+b'\n')
                 write(b'</tv>\n')
             raw.flush(); os.fsync(raw.fileno())

@@ -1,7 +1,6 @@
 """Prepare and verify the Kodi V2 contract in a local, private Git repository."""
 from collections import Counter
 from datetime import datetime, timezone
-import gzip
 import hashlib
 import json
 import os
@@ -11,29 +10,26 @@ import sqlite3
 import subprocess
 import tempfile
 
-from .artwork_selection import approved_url
+from . import dtd_validation
 from .full_export import (
-    _CompressedSink, read_full_archive, read_private_json, read_run_manifest,
+    read_full_archive, read_private_json, read_run_manifest,
     verify_archive, verify_run_member,
 )
 from .private_preview import private_root
-from .streaming import Limits, file_sha, memory_guard
+from .streaming import Limits, memory_guard
 from .xmltv import IMAGE_HOSTS, timestamp
+from .xmltv_images import IMAGE_COUNTS, STANDARD_ROLES, image_attributes, image_url
 
 MANIFEST = 'manifest.json'
 XMLTV = 'xcmate-epg.xml.gz'
-ARTWORK = 'xcmate-artwork.jsonl.gz'
 REF = 'refs/heads/main'
 MAX_GZIP = 48 * 1024 * 1024
 MAX_XML = 768 * 1024 * 1024
-MAX_ARTWORK = 192 * 1024 * 1024
+MAX_ARTWORK = 768 * 1024 * 1024
 MAX_RECORD = 128 * 1024
-MAX_RECORDS = 500_000
+MAX_RECORDS = 3_000_000
 SHA = re.compile(r'[a-f0-9]{64}')
-ROLES = {'poster', 'backdrop', 'fanart', 'episode_still', 'thumb',
-         'channel_logo', 'clearlogo', 'season_poster'}
-PROVIDERS = {'tmdb', 'tvmaze', 'xmltv', 'manual', 'source_declared', 'feed'}
-SCOPES = {'movie', 'series', 'episode', 'channel', 'season', 'programme'}
+PROVIDERS = {'tmdb', 'tvmaze', 'xmltv', 'source_declared'}
 GATES = {'restore', 'sources', 'mapping', 'artwork', 'delivery', 'client', 'rights', 'release'}
 SECRETS = re.compile(r'Bearer\s|(?:password|token|api[_-]?key|username)\s*[:=]|github_pat_', re.I)
 
@@ -80,106 +76,105 @@ def _reference(channel, start, stop, url):
     return channel, *times, url
 
 
-def _record(raw, allowed_sources):
+def _record(raw, sources):
     if not isinstance(raw, dict):
         raise ValueError('INVALID_ARTWORK_RECORD')
     role, url, channel = (raw.get(key) for key in ('type', 'url', 'channel'))
-    provider, attribution = raw.get('provider'), raw.get('attribution')
-    digest = raw.get('sha256')
-    if (not isinstance(channel, str) or channel.partition(':')[0] not in allowed_sources
-            or not channel.partition(':')[2] or not isinstance(role, str) or role not in ROLES
+    provider, attribution, digest = (raw.get(key) for key in ('provider', 'attribution', 'sha256'))
+    if (not isinstance(channel, str) or len(channel) > 512 or channel.partition(':')[0] not in sources
+            or not channel.partition(':')[2] or not isinstance(role, str)
+            or role not in (*STANDARD_ROLES, 'channel_logo')
             or not isinstance(provider, str) or provider not in PROVIDERS
-            or raw.get('verified') is not True or not approved_url(url, IMAGE_HOSTS, ())
-            or SECRETS.search(url)
+            or raw.get('verified') is not True or not isinstance(url, str) or SECRETS.search(url)
             or not isinstance(attribution, str) or not attribution.strip() or len(attribution) > 512
             or SECRETS.search(attribution)
             or not isinstance(digest, str) or not SHA.fullmatch(digest)
             or raw.get('mime_type') not in ('image/jpeg', 'image/png', 'image/webp')
             or any(type(raw.get(key)) is not int or raw[key] <= 0 for key in ('width', 'height', 'size_bytes'))):
         raise ValueError('INVALID_ARTWORK_RECORD')
-    source = channel.partition(':')[0]
-    row = {key: raw[key] for key in ('type', 'url', 'channel', 'provider', 'attribution',
-                                    'verified', 'sha256', 'mime_type', 'width', 'height', 'size_bytes')}
-    row['source'] = source
-    row['validation'] = 'verified_image_structure'
+    image_url(url, IMAGE_HOSTS)
     if role == 'channel_logo':
-        row['scope'] = 'channel'
-        start = stop = ''
-    else:
-        start, stop = raw.get('start'), raw.get('stop')
-        if (not isinstance(start, str) or not isinstance(stop, str)
-                or timestamp(start) >= timestamp(stop) or raw.get('source') not in (None, source)):
-            raise ValueError('INVALID_ARTWORK_EVENT')
-        row.update(start=start, stop=stop,
-                   scope=raw['scope'] if raw.get('scope') in SCOPES else 'programme')
-    for key, values in (('display_role', ROLES),
-                        ('confidence', {'confirmed', 'source_declared', 'verified_match'})):
-        if raw.get(key) in values:
-            row[key] = raw[key]
-    event_key = raw.get('event_key')
-    if isinstance(event_key, str) and SHA.fullmatch(event_key):
-        row['event_key'] = event_key
-    identifier = raw.get('provider_id')
-    if type(identifier) is int and identifier > 0:
-        row['provider_id'] = identifier
-    evidence = raw.get('evidence')
-    if evidence:
-        row['evidence_sha256'] = hashlib.sha256(json.dumps(evidence, sort_keys=True).encode()).hexdigest()
-    elif isinstance(raw.get('evidence_sha256'), str) and SHA.fullmatch(raw['evidence_sha256']):
-        row['evidence_sha256'] = raw['evidence_sha256']
-    return _reference(channel, start, stop, url), row
+        return (*_reference(channel, '', '', url), role, '')
+    start, stop = raw.get('start'), raw.get('stop')
+    if (not isinstance(start, str) or not isinstance(stop, str)
+            or timestamp(start) >= timestamp(stop)
+            or raw.get('source') not in (None, channel.partition(':')[0])
+            or provider == 'source_declared'):
+        raise ValueError('INVALID_ARTWORK_EVENT')
+    attrs = image_attributes(dict(raw, selected_role=role, selected_provider=provider))
+    return (*_reference(channel, start, stop, url), attrs['type'], json.dumps(attrs, sort_keys=True))
 
 
-def _artwork_and_xmltv(xmltv, sidecar, output, sources):
-    count = total = 0
-    roles = set()
-    programmes_by_source = Counter()
+def _verify_delivery_xmltv(xmltv, audit, stage, sources):
     limits = Limits()
-    stage = output.parent
+    image_counts = dict.fromkeys(IMAGE_COUNTS, 0)
+    programmes_by_source = Counter()
+    earliest = latest = None
+    seen_channels = 0
     with sqlite3.connect(stage / 'artwork-audit.sqlite') as db:
-        db.execute('''CREATE TABLE reference (
-            channel TEXT, start INTEGER, stop INTEGER, url TEXT, seen INTEGER DEFAULT 0,
-            PRIMARY KEY (channel, start, stop, url)) WITHOUT ROWID''')
-        with sidecar.open('rb') as source, output.open('wb') as raw:
-            sink = _CompressedSink(raw, MAX_GZIP)
-            with gzip.GzipFile(filename='', mode='wb', fileobj=sink, mtime=0) as target:
-                while line := source.readline(MAX_RECORD + 1):
-                    count += 1
-                    if len(line) > MAX_RECORD or count > MAX_RECORDS:
-                        raise ValueError('ARTWORK_RECORD_LIMIT')
-                    memory_guard(limits)
-                    identity, row = _record(json.loads(line), sources)
-                    roles.add(row['type'])
-                    db.execute('INSERT OR IGNORE INTO reference VALUES (?, ?, ?, ?, 0)', identity)
-                    payload = (json.dumps(row, ensure_ascii=False, sort_keys=True) + '\n').encode()
-                    total += len(payload)
-                    if len(payload) > MAX_RECORD or total > MAX_ARTWORK:
-                        raise ValueError('ARTWORK_EXPANSION_LIMIT')
-                    target.write(payload)
+        db.execute("""CREATE TABLE reference (
+            channel TEXT, start INTEGER, stop INTEGER, url TEXT, role TEXT, attrs TEXT,
+            seen INTEGER DEFAULT 0, PRIMARY KEY (channel, start, stop, url, role, attrs)
+        ) WITHOUT ROWID""")
+        with audit.open('rb') as source:
+            records = 0
+            while line := source.readline(MAX_RECORD + 1):
+                records += 1
+                if len(line) > MAX_RECORD or records > MAX_RECORDS:
+                    raise ValueError('ARTWORK_RECORD_LIMIT')
+                memory_guard(limits)
+                db.execute('INSERT OR IGNORE INTO reference VALUES (?, ?, ?, ?, ?, ?, 0)',
+                           _record(json.loads(line), sources))
 
         def on_channel(channel):
-            if channel.partition(':')[0] not in sources or not channel.partition(':')[2]:
+            nonlocal seen_channels
+            seen_channels += 1
+            if (len(channel) > 512 or channel.partition(':')[0] not in sources
+                    or not channel.partition(':')[2] or seen_channels > 100_000):
                 raise ValueError('UNIVERSAL_CHANNEL_NOT_SOURCE_QUALIFIED')
 
         def on_programme(channel):
             programmes_by_source[channel.partition(':')[0]] += 1
 
+        def on_times(start, stop):
+            nonlocal earliest, latest
+            earliest = start if earliest is None else min(earliest, start)
+            latest = stop if latest is None else max(latest, stop)
+
         def on_icon(channel, start, stop, url):
-            updated = db.execute('UPDATE reference SET seen=1 WHERE channel=? AND start=? AND stop=? AND url=?',
-                                 _reference(channel, start, stop, url))
+            identity = _reference(channel, start, stop, url)
+            if start:
+                image_counts['programme_icon'] += 1
+                result = db.execute('SELECT 1 FROM reference WHERE channel=? AND start=? AND stop=? AND url=?',
+                                    identity).fetchone()
+            else:
+                image_counts['channel_logo'] += 1
+                result = db.execute("""UPDATE reference SET seen=1
+                    WHERE channel=? AND start=? AND stop=? AND url=? AND role='channel_logo'""", identity).rowcount
+            if not result:
+                raise ValueError('ARTWORK_XMLTV_REFERENCE_MISMATCH')
+
+        def on_image(channel, start, stop, url, attrs):
+            role = attrs['type']
+            image_counts[role] += 1
+            arguments = (*_reference(channel, start, stop, url), role, json.dumps(attrs, sort_keys=True))
+            updated = db.execute("""UPDATE reference SET seen=1
+                WHERE channel=? AND start=? AND stop=? AND url=? AND role=? AND attrs=?""", arguments)
             if not updated.rowcount:
                 raise ValueError('ARTWORK_XMLTV_REFERENCE_MISMATCH')
 
         counts = verify_archive(xmltv, max_xml_bytes=MAX_XML, memory_check=lambda: memory_guard(limits),
-                                on_channel=on_channel,
-                                on_programme=on_programme, on_icon=on_icon)
-        if programmes_by_source != sources:
+                                on_channel=on_channel, on_programme=on_programme, on_icon=on_icon,
+                                on_image=on_image, on_times=on_times)
+        if programmes_by_source != sources or counts['programmes'] > 3_000_000:
             raise ValueError('DELIVERY_SOURCE_COUNT_MISMATCH')
-        if (not count or db.execute('SELECT 1 FROM reference WHERE seen=0 LIMIT 1').fetchone()):
+        if db.execute('SELECT 1 FROM reference WHERE seen=0 LIMIT 1').fetchone():
             raise ValueError('ARTWORK_XMLTV_REFERENCE_MISMATCH')
-        if 'channel_logo' not in roles or roles == {'channel_logo'}:
+        if not image_counts['channel_logo'] or not any(image_counts[role] for role in ('poster', 'backdrop', 'still')):
             raise ValueError('INCOMPLETE_DELIVERY_ARTWORK')
-    return counts, count
+    window = {'start_utc': earliest.astimezone(timezone.utc).isoformat(),
+              'stop_utc': latest.astimezone(timezone.utc).isoformat()}
+    return counts, image_counts, window
 
 
 class _LocalDelivery:
@@ -232,9 +227,9 @@ class _LocalDelivery:
         self.git('update-ref', REF, revision, previous or '0' * 40)
 
 
-def publish_delivery(workspace, *, approval=None):
+def publish_delivery(workspace, *, approval=None, dtd_path=None):
     """Bind one approved immutable run to a verified offline V2 delivery ref."""
-    pending = {'schema_version': 2, 'file': XMLTV, 'status': 'PRIVATE_PENDING',
+    pending = {'schema_version': 3, 'file': XMLTV, 'status': 'PRIVATE_PENDING',
                'reason_code': 'PRODUCTION_DATA_NOT_APPROVED'}
     if approval is None:
         return pending
@@ -246,37 +241,35 @@ def publish_delivery(workspace, *, approval=None):
     report = read_private_json(verify_run_member(bundle, checksums, 'quality-report.json', 1024 * 1024)[0])
     sources = _quality(report)
     xmltv, full = read_full_archive(bundle, checksums, MAX_GZIP)
-    source_artwork = verify_run_member(bundle, checksums, 'artwork-metadata.jsonl', MAX_ARTWORK)[0]
+    audit = verify_run_member(bundle, checksums, 'artwork-metadata.jsonl', MAX_ARTWORK)[0]
+    # libxml2 sees only the pinned local grammar and independently verifies the
+    # structure. Expat then rejects supplied DTD declarations and audits counts.
+    dtd_validation.validate(xmltv, dtd_path, max_bytes=MAX_XML)
     with tempfile.TemporaryDirectory(prefix='.delivery-', dir=root) as directory:
         stage = Path(directory)
-        artwork = stage / ARTWORK
-        counts, records = _artwork_and_xmltv(xmltv, source_artwork, artwork, sources)
+        counts, images, window = _verify_delivery_xmltv(xmltv, audit, stage, sources)
         if any(full.get(key) != counts[key] for key in ('channels', 'programmes', 'xml_bytes')):
             raise ValueError('UNIVERSAL_COUNT_MISMATCH')
-        artwork_sha, artwork_size = file_sha(artwork, MAX_GZIP)
-        manifest = {'schema_version': 2, 'status': 'PRIVATE_READY', 'file': XMLTV,
-                    'bytes': full['bytes'], 'sha256': full['sha256'], 'channel_count': counts['channels'],
-                    'programme_count': counts['programmes'], 'source_count': len(sources),
-                    'artwork': {'file': ARTWORK, 'bytes': artwork_size, 'sha256': artwork_sha,
-                                'records': records}}
+        manifest = {'schema_version': 3, 'status': 'PRIVATE_READY', 'file': XMLTV,
+                    'bytes': full['bytes'], 'sha256': full['sha256'], 'revision': full['sha256'],
+                    'channel_count': counts['channels'], 'programme_count': counts['programmes'],
+                    'source_count': len(sources), 'image_counts': images, 'window': window}
         delivery = _LocalDelivery(root, stage)
         previous = delivery.current()
         if previous:
             before = json.loads(delivery.git('show', f'{previous}:{MANIFEST}').stdout)
             if all(before.get(key) == value for key, value in manifest.items()):
-                for descriptor in (manifest, manifest['artwork']):
-                    delivery.check_payload(before['payload_ref'], descriptor)
+                delivery.check_payload(before['payload_ref'], manifest)
                 return dict(before, changed=False)
-        blobs = {XMLTV: delivery.blob(xmltv), ARTWORK: delivery.blob(artwork)}
-        payload = delivery.commit(blobs, previous, 'Prepare verified V2 data')
-        for descriptor in (manifest, manifest['artwork']):
-            delivery.check_payload(payload, descriptor)
+        blobs = {XMLTV: delivery.blob(xmltv)}
+        payload = delivery.commit(blobs, previous, 'Prepare verified XMLTV delivery')
+        delivery.check_payload(payload, manifest)
         manifest.update(payload_ref=payload, generated_at_utc=datetime.now(timezone.utc).isoformat(timespec='seconds'))
         manifest_path = stage / MANIFEST
         manifest_bytes = (json.dumps(manifest, sort_keys=True) + '\n').encode()
         manifest_path.write_bytes(manifest_bytes)
         blobs[MANIFEST] = delivery.blob(manifest_path)
-        revision = delivery.commit(blobs, payload, 'Commit verified V2 manifest')
+        revision = delivery.commit(blobs, payload, 'Commit verified XMLTV manifest')
         if delivery.git('show', f'{revision}:{MANIFEST}').stdout != manifest_bytes:
             raise ValueError('LOCAL_DELIVERY_READBACK_MISMATCH')
         delivery.install(revision, previous)

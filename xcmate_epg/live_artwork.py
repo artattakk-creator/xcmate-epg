@@ -913,6 +913,14 @@ class ArtworkEnricher:
             record = self._record(clean, 'unclassified_source_image', icon.get('src', ''), 'feed', None,
                                   {'source': 'original programme icon', 'identity_verified': False})
             feed.append(record)
+        for image in clean.findall('image'):
+            clean.remove(image)
+            role = image.get('type')
+            if role not in {'poster', 'backdrop', 'still', 'person', 'character'} or len(image):
+                continue
+            url = (image.text or '').strip()
+            feed.append(self._record(clean, role, url, 'feed', None,
+                {'source': 'original programme image', 'identity_verified': False}))
         tree.append(clean)
         # Only explicit alternatives belonging to the same provider record may
         # be tried. Keep failed originals as private evidence in records.
