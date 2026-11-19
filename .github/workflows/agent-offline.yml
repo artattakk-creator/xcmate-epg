@@ -1,0 +1,48 @@
+name: XCMate EPG Agent - offline validation
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'xcmate_epg/**'
+      - 'tests/**'
+      - '.github/workflows/agent-offline.yml'
+permissions:
+  contents: read
+concurrency:
+  group: epg-offline-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Prepare pinned offline XMLTV schema validator
+        run: |
+          python -m pip install lxml==6.1.1
+          dtd="$RUNNER_TEMP/xmltv.dtd"
+          curl --fail --silent --show-error --proto '=https' --max-time 20 \
+            https://raw.githubusercontent.com/XMLTV/xmltv/f33601698cf1f1c7a67030b9ec2d3ad565421b5a/xmltv.dtd \
+            -o "$dtd"
+          printf '%s  %s\n' a1c88c4b840a6a80f8c5b6e6b850a864a0340148a01e63d6f59326c846f1d5c2 "$dtd" | sha256sum --check
+          printf 'XCMATE_XMLTV_DTD=%s\n' "$dtd" >> "$GITHUB_ENV"
+      # ONLY synthetic state: PRs may read repository Actions caches.
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/xcmate-synthetic-state
+          key: synthetic-v1-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            synthetic-v1-${{ github.ref_name }}-
+      - name: Unit and mocked transport tests, no network or secrets
+        run: python -m unittest discover -s tests -v
+      - name: Existing bootstrap smoke
+        run: python tools/smoke_xmltv.py --output "$RUNNER_TEMP/bootstrap-smoke"
+      - name: Synthetic incremental CLI and restart
+        run: |
+          python -m xcmate_epg --state "$RUNNER_TEMP/xcmate-synthetic-state/state.sqlite" --output "$RUNNER_TEMP/epg-demo"
+          cp "$RUNNER_TEMP/epg-demo/manifest.json" "$RUNNER_TEMP/before.json"
+          python -m xcmate_epg --state "$RUNNER_TEMP/xcmate-synthetic-state/state.sqlite" --output "$RUNNER_TEMP/epg-demo"
+          cmp "$RUNNER_TEMP/before.json" "$RUNNER_TEMP/epg-demo/manifest.json"

@@ -221,3 +221,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# XCMate private state and development outputs
+work/
+*.sqlite
+*.sqlite-*
+config/private*

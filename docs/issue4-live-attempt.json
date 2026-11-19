@@ -1,0 +1,158 @@
+{
+  "status": "PRIVATE_EPG_CREATED",
+  "real_sources_successful": 3,
+  "channels": 23,
+  "programmes": 3928,
+  "time_range": {
+    "start": "2026-11-16T06:00:00+01:00",
+    "stop": "2026-11-24T01:28:00+00:00"
+  },
+  "size_bytes": 875298,
+  "sha256": "3edde025d368f3069b541545b688a088ce7942132bf00209cdc460c161833f8e",
+  "channel_map_confirmed": 0,
+  "artwork_status": "PENDING",
+  "artwork_matched": 0,
+  "logos_present": 0,
+  "programme_images_present": 0,
+  "ambiguous": 0,
+  "errors": 0,
+  "date": "2026-11-17",
+  "configured_sources": 3,
+  "output_exists": true,
+  "scope": "Explicit real DACH channel subset from all three configured feeds; source-qualified identities, no provider aliases",
+  "network": [
+    {
+      "host": "api.themoviedb.org",
+      "http_status": 401,
+      "tls_verified": true
+    },
+    {
+      "host": "api.tvmaze.com",
+      "http_status": 200,
+      "tls_verified": true
+    },
+    {
+      "host": "image.tmdb.org",
+      "http_status": 404,
+      "tls_verified": true
+    },
+    {
+      "host": "static.tvmaze.com",
+      "http_status": 301,
+      "tls_verified": true,
+      "redirect_not_followed": true,
+      "redirect_host_not_granted": true
+    },
+    {
+      "host": "epgshare01.online",
+      "http_status": 200,
+      "tls_verified": true,
+      "sources_successful": 2
+    },
+    {
+      "host": "kaimandura.github.io",
+      "http_status": 200,
+      "tls_verified": true,
+      "sources_successful": 1
+    }
+  ],
+  "sources": [
+    {
+      "id": "s1",
+      "http_status": 200,
+      "compression": "gzip",
+      "compressed_bytes": 3470663,
+      "decompressed_bytes": 21921488,
+      "encoding": "UTF-8",
+      "doctype_present": false,
+      "channels": 266,
+      "programmes": 22614,
+      "time_range": {
+        "start": "2026-11-16T00:30:32-06:00",
+        "stop": "2026-11-21T13:00:00+00:00"
+      },
+      "selected_channels": 7,
+      "selected_programmes": 849,
+      "invalid_programme_times": 1,
+      "blank_titles": 0,
+      "unreferenced_programme_channel_ids": 0,
+      "declared_external_dtd_not_loaded": false
+    },
+    {
+      "id": "s2",
+      "http_status": 200,
+      "compression": "gzip",
+      "compressed_bytes": 3721683,
+      "decompressed_bytes": 19372206,
+      "encoding": "UTF-8",
+      "doctype_present": true,
+      "channels": 144,
+      "programmes": 18503,
+      "time_range": {
+        "start": "2026-11-16T06:00:00+01:00",
+        "stop": "2026-11-20T20:15:00+01:00"
+      },
+      "selected_channels": 6,
+      "selected_programmes": 944,
+      "invalid_programme_times": 0,
+      "blank_titles": 0,
+      "unreferenced_programme_channel_ids": 0,
+      "declared_external_dtd_not_loaded": true
+    },
+    {
+      "id": "s3",
+      "http_status": 200,
+      "compression": "gzip",
+      "compressed_bytes": 13301178,
+      "decompressed_bytes": 100488538,
+      "encoding": "UTF-8",
+      "doctype_present": false,
+      "channels": 868,
+      "programmes": 144829,
+      "time_range": {
+        "start": "2026-11-15T05:00:00+00:00",
+        "stop": "2026-11-30T23:30:00+00:00"
+      },
+      "selected_channels": 10,
+      "selected_programmes": 2135,
+      "invalid_programme_times": 0,
+      "blank_titles": 0,
+      "unreferenced_programme_channel_ids": 0,
+      "declared_external_dtd_not_loaded": false
+    }
+  ],
+  "validation": {
+    "all_programme_channel_time_title_records_match_subset": true,
+    "all_output_ids_source_qualified": true,
+    "dangling_programme_references": 0,
+    "manifest_version_and_checksum_match": true,
+    "gzip_valid": true,
+    "unchanged_sha": true,
+    "lastgood_sha": true,
+    "manifest_not_rewritten_on_replay": true,
+    "redownloads_for_replay": 0,
+    "omitted_private_link_records": {
+      "channel_url": 13,
+      "programme_icon": 3952,
+      "channel_icon": 11,
+      "programme_image": 2178,
+      "programme_url": 91
+    },
+    "checked_at": "2026-11-17T17:02:57.718102+00:00",
+    "channels_with_current_programme": 23,
+    "channels_without_current_programme": 0,
+    "channels_without_any_programme": 0,
+    "overlapping_intervals": 0,
+    "unit_tests_passed": 47,
+    "offline_smoke_passed": true,
+    "independent_code_review": "No actionable findings"
+  },
+  "limitations": [
+    "First no-artwork preview: original icons, nonstandard image nodes and URL metadata retained only in private snapshots/omission records. No approved CDN artwork match claimed.",
+    "Source s1 has one invalid programme duration outside the selected channels; exported subset has zero invalid durations.",
+    "No confirmed provider-to-XMLTV mapping; matching display names across sources were not collapsed.",
+    "TMDB unauthenticated connectivity only (401), no token read or authenticated artwork call. CDN root status is not an asset check.",
+    "XCMate 0.1.29.97 and visible BINGIE artwork remain unverified."
+  ],
+  "private_transfer": "Files verified locally under ignored work/private-live/run/output (directories 0700, files 0600). Google Drive upload was denied by automatic approval review; no EPG payload uploaded, explicit destination approval required. No public endpoint."
+}
