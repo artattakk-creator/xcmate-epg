@@ -2,7 +2,11 @@
 
 Zentraler, optionaler XMLTV-Dienst für **XCMate / Kodi**. Ziel: EPGShare01 und Kaimandura inkrementell zusammenführen, TV-Programme mit TMDB-/TVMaze-Artwork und rechtlich zulässigen Senderlogos ergänzen, validierte XMLTV-GZIP-Datei über GitHub Pages bereitstellen.
 
-> **Status: Einrichtung / noch kein produktiver EPG-Agent.** Keine echten Datenquellen, automatischen 24-Stunden-Jobs, TMDB-Secrets oder öffentliche EPG-Datei sind hier bislang eingerichtet. Kostenpflichtige Dienste werden nicht verwendet.
+> **Status: privater V2-Probelauf, noch kein Produktivbetrieb.** Drei vollständige Quellen liefern 1.278 quellenqualifizierte Sendereinträge und 185.945 gültige Programme. Gerätezuordnung und Artwork bleiben `PARTIAL_COVERAGE / ARTWORK_BLOCKED`; der authentifizierte TMDB-Test ist in der aktuellen Instanz `TMDB_LIVE_PENDING`. Keine öffentliche EPG-Datei, Tagesjobs oder kostenpflichtigen Dienste.
+
+Vollimport, echte Bildnachweise und Grenzen: [Issue-6-Runbook](docs/ISSUE6_PRIVATE_FULL_DE.md),
+[aggregierte Abnahme](docs/issue6-acceptance.json), [Fortsetzung auf dem bestehenden Branch](docs/ISSUE6_HANDOFF_DE.md).
+Alle tatsächlichen EPG-Daten, persönlichen Kataloge und Caches bleiben privat außerhalb von Git.
 
 ## Projektverknüpfungen
 
@@ -30,7 +34,7 @@ Die GitHub-Budgets bleiben auf 0 USD. Kein Budget erhöhen und keine kostenpflic
 ## Sicherheit und Rechte
 
 - **Keine persönlichen Senderkataloge, Portaladressen, EPG-Zugangsdaten oder Backups** in dieses öffentliche Repository laden.
-- Der `TMDB_READ_ACCESS_TOKEN` muss später ausdrücklich und **separat als Repository-Secret** für dieses Repository angelegt werden; Repository-Secrets werden nicht automatisch zwischen Repositories geteilt.
+- Der private Codex-Lauf verwendet ausschließlich die ausdrücklich autorisierte Runtime-Bindung von `TMDB_READ_ACCESS_TOKEN`. Persönliche HTTP-Secrets und GitHub-Repository-Secrets sind getrennt; Zugangsdaten werden nicht zwischen ihnen kopiert. Details und Live-Status stehen im Issue-6-Runbook.
 - TMDB-API-Anfragen verwenden den geheimen Bearer-Token; XMLTV-Bild-URLs dürfen **keinen** Token enthalten.
 - Quellen-/Artwork-Lizenzen und das Recht zur öffentlichen Weitergabe **vor** einer GitHub-Pages-Veröffentlichung prüfen.
 - Keine täglichen Jobs oder Veröffentlichungen ohne separate Freigabe; Fehler dürfen niemals den letzten gültigen EPG überschreiben.
@@ -48,6 +52,7 @@ python3 -m unittest discover -s tests -v
 python3 -m xcmate_epg --state work/private/state.sqlite --output work/demo
 ```
 
-**Weiterhin gesperrt:** produktive Quellen, Veröffentlichung, Tagesplan und Kodi-Änderungen.
-Der Auftrag bestätigt ein vorhandenes Repository-Secret; dessen Existenz wurde nicht geprüft.
-Die frühere Einrichtungsnotiz zur Secret-Anlage ist deshalb historischer Bootstrap-Stand.
+**Weiterhin gesperrt:** Merge, öffentliche Veröffentlichung, produktiver Tagesplan und Kodi-Änderungen.
+Die synthetische Standard-CLI bleibt erhalten; der vollständige private Import ist ein eigener,
+explizit autorisierter One-shot-Befehl. Authentifizierte TMDB-Live-Ergebnisse werden erst
+nach tatsächlichen erfolgreichen Abrufen ausgewiesen.

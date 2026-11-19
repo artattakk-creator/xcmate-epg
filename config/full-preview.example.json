@@ -1,0 +1,28 @@
+{
+  "sources": [
+    {"id": "s1", "path": "work/private-input/s1.xml.gz", "priority": 1},
+    {"id": "s2", "path": "work/private-input/s2.xml.gz", "priority": 2},
+    {"id": "s3", "path": "work/private-input/s3.xml.gz", "priority": 3}
+  ],
+  "mapping": {"path": "work/private-input/mapping.json"},
+  "artwork": {
+    "authorize_tvmaze": false,
+    "tmdb_secret_env": "TMDB_READ_ACCESS_TOKEN",
+    "tmdb_http_binding": null,
+    "max_requests": 200,
+    "max_image_requests": 100,
+    "request_interval": 0.55
+  },
+  "horizon": {"past_days": 7, "future_days": 20},
+  "limits": {
+    "max_compressed_bytes": 67108864,
+    "max_expanded_bytes": 268435456,
+    "max_expansion_ratio": 200,
+    "max_records": 1000000,
+    "max_record_bytes": 2097152,
+    "max_depth": 32,
+    "max_seconds": 300,
+    "max_memory_bytes": 536870912,
+    "max_store_bytes": 2147483648
+  }
+}
