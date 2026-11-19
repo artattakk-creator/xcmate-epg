@@ -15,6 +15,7 @@ from urllib.parse import urlencode, urlsplit
 from xml.etree import ElementTree as ET
 
 from . import artwork, pipeline
+from .artwork_selection import fits
 from .fetch import http_get
 from .image_validation import validate_image
 from .xmltv import IMAGE_HOSTS, public_image
@@ -282,6 +283,10 @@ class ArtworkEnricher:
         return result
 
     def verify_media(self, url):
+        result = self.verify_selection_media(url)
+        return {key: value for key, value in result.items() if key not in {'width', 'height'}}
+
+    def verify_selection_media(self, url):
         """Verify an explicitly supplied approved CDN image; never follow redirects."""
         failure = {'verified': False, 'sha256': None, 'size_bytes': 0, 'mime_type': None}
         try:
@@ -291,7 +296,7 @@ class ArtworkEnricher:
                 raise ValueError()
         except (ValueError, TypeError, AttributeError):
             return dict(failure, error='image_policy')
-        key = json.dumps(['verified-image-v2-structure', url])
+        key = json.dumps(['verified-image-v3-dimensions', url])
         found, result = self.state.cached(key)
         if found:
             self.counts['image_cache_hits'] += 1
@@ -313,9 +318,9 @@ class ArtworkEnricher:
             if (any(k.lower() == 'location' for k in response.headers)
                     or getattr(response, 'url', url) != url or response.status != 200):
                 raise ValueError()
-            validate_image(body, mime)
+            width, height = validate_image(body, mime)
             result = {'verified': True, 'sha256': hashlib.sha256(body).hexdigest(),
-                      'size_bytes': len(body), 'mime_type': mime}
+                      'size_bytes': len(body), 'mime_type': mime, 'width': width, 'height': height}
             self.counts['image_successes'] += 1
             self.counts['verified_images'] += 1
         except (TimeoutError, OSError):
@@ -833,6 +838,12 @@ class ArtworkEnricher:
                 'start': programme.get('start'), 'stop': programme.get('stop')}
 
     def enrich(self, channel, programme):
+        return self._enrich(channel, programme)
+
+    def enrich_with_selection(self, channel, programme, *, collect_images):
+        return self._enrich(channel, programme, stable=True, collect_images=collect_images)
+
+    def _enrich(self, channel, programme, *, stable=False, collect_images=True):
         self.last_metadata = None
         self.counts['programmes_considered'] += 1
         title = programme.findtext('title', '')
@@ -981,14 +992,30 @@ class ArtworkEnricher:
                         identifier, dict(evidence, season_number=episode[0], season_id=season.get('id'),
                                          season_identity='exact'), scope='season')
                     records.extend(season_records)
-        if provider is None and self.authorize_tvmaze and (episode or standalone_series):
-            value = self._tvmaze_lookup(title, year, episode)
+        checked_images = {}
+        verify = self.verify_selection_media if stable else self.verify_media
+        need_tvmaze = provider is None
+        if (collect_images and provider == 'tmdb' and stable
+                and self.authorize_tvmaze and (episode or standalone_series)):
+            covered = set()
+            for record in records:
+                url = record['url']
+                if url not in checked_images:
+                    checked_images[url] = verify(url)
+                evidence = checked_images[url]
+                if evidence.get('verified') and fits(record['type'], evidence.get('width'), evidence.get('height')):
+                    covered.add(record['type'])
+            need_tvmaze = not covered.issuperset({'backdrop', 'poster'} | ({'episode_still'} if episode else set()))
+        if need_tvmaze and self.authorize_tvmaze and (episode or standalone_series):
+            maze_year = enriched.findtext('date', '')[:4] if provider == 'tmdb' and not episode else year
+            value = self._tvmaze_lookup(title, maze_year, episode)
             if value:
-                provider, scope = 'tvmaze', 'episode' if episode else 'series'
                 detail, ep = value['show'], value['episode']
-                identifier = detail['id']
+                maze_id = detail['id']
+                if provider is None:
+                    provider, scope, identifier = 'tvmaze', 'episode' if episode else 'series', maze_id
                 if enriched.find('episode-num[@system="tvmaze"]') is None:
-                    ET.SubElement(enriched, 'episode-num', {'system': 'tvmaze'}).text = 'tv/' + str(identifier) + (f'/{episode[0]}/{episode[1]}' if episode else '')
+                    ET.SubElement(enriched, 'episode-num', {'system': 'tvmaze'}).text = 'tv/' + str(maze_id) + (f'/{episode[0]}/{episode[1]}' if episode else '')
                 plot = ep if ep is not None and self.tvmaze_bulk_metadata else detail
                 summary = plot.get('summary')
                 if not enriched.findtext('desc') and isinstance(summary, str) and len(summary) <= _MAX_EPISODE_SUMMARY:
@@ -1015,7 +1042,7 @@ class ArtworkEnricher:
                     image = media.get('image') if media else None
                     url = image.get('original') if isinstance(image, dict) else None
                     if isinstance(url, str):
-                        record = self._record(enriched, kind, url, 'tvmaze', identifier, dict(evidence))
+                        record = self._record(enriched, kind, url, 'tvmaze', maze_id, dict(evidence))
                         if self.tvmaze_gallery:
                             record['scope'] = 'series' if kind == 'poster' else 'episode'
                             record['evidence']['resolution'] = 'original'
@@ -1023,14 +1050,14 @@ class ArtworkEnricher:
                             if isinstance(medium, str) and medium != url:
                                 resolution_fallbacks[id(record)] = {'url': medium}
                         records.append(record)
-                if self.tvmaze_gallery:
-                    image = self._tvmaze_gallery_image(identifier)
+                if self.tvmaze_gallery and collect_images:
+                    image = self._tvmaze_gallery_image(maze_id)
                     if image:
                         gallery_evidence = dict(evidence, gallery_image_id=image['id'], resolution='original',
-                            gallery_endpoint=f'https://api.tvmaze.com/shows/{identifier}/images',
+                            gallery_endpoint=f'https://api.tvmaze.com/shows/{maze_id}/images',
                             provider_dimensions={key: image['original'][key] for key in ('width', 'height')})
                         record = self._record(enriched, 'backdrop', image['original']['url'],
-                                              'tvmaze', identifier, gallery_evidence)
+                                              'tvmaze', maze_id, gallery_evidence)
                         record['scope'] = 'series'
                         records.append(record)
                         if image['medium'] and image['medium']['url'] != record['url']:
@@ -1051,9 +1078,12 @@ class ArtworkEnricher:
         fallback_records = []
         emitted_urls = set()
         for record in records:
+            if not collect_images:
+                continue
             if record['provider'] == 'feed' and not self.config.get('allow_feed_images', False):
                 continue
-            record.update(self.verify_media(record['url']))
+            checked = checked_images.get(record['url'])
+            record.update(checked if checked is not None else verify(record['url']))
             if record['verified']:
                 if not self.tvmaze_gallery or record['url'] not in emitted_urls:
                     ET.SubElement(enriched, 'icon', {'src': record['url']})
@@ -1073,7 +1103,7 @@ class ArtworkEnricher:
                     record['provider'], record['provider_id'],
                     evidence)
                 medium['scope'] = record['scope']
-                medium.update(self.verify_media(medium['url']))
+                medium.update(verify(medium['url']))
                 if medium['verified']:
                     fallback_records.append(medium)
                     if medium['url'] not in emitted_urls:

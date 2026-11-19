@@ -2,6 +2,7 @@
 import argparse
 from collections import Counter
 import copy
+from contextlib import nullcontext
 from datetime import datetime,timedelta,timezone
 import hashlib
 import json
@@ -14,6 +15,7 @@ import tempfile
 from urllib.parse import urlsplit
 from xml.etree import ElementTree as ET
 
+from .artwork_selection import ArtworkSelections, PLACEHOLDER, event_key, local_choice, standard_image, validated_candidate
 from .channel_mapping import build_mapping,persist_mapping
 from .export import atomic
 from .full_export import publish_stream,publish_run
@@ -139,7 +141,8 @@ def _run(config,root,limits,metadata,artwork_config,authorize_network):
         mapping['full_provider_denominator']=len(catalog) if catalog_complete else None
         with State(root/'artwork.sqlite') as state:
             if metadata is None and (artwork_config.get('authorize_tvmaze') or artwork_config.get('tmdb_secret_env')
-                                     or artwork_config.get('tmdb_http_binding')):
+                                     or artwork_config.get('tmdb_http_binding')
+                                     or (authorize_network and artwork_config.get('stable_selection') is True)):
                 from .live_artwork import ArtworkEnricher
                 from .tmdb_runtime import runtime_tmdb_client, TMDB_LIVE_PENDING
                 tmdb=None; env_name=artwork_config.get('tmdb_secret_env')
@@ -156,8 +159,9 @@ def _run(config,root,limits,metadata,artwork_config,authorize_network):
             stage=Path(tempfile.mkdtemp(prefix='.run-pending-',dir=root))
             try:
                 persist_mapping(mapping,stage/'mapping-review.json')
-                result=_render(config,stage,spool,channels,mapping,metadata,reports,hosts,forbidden,artwork_config)
-                publish_run(stage,root,memory_check=lambda:memory_guard(limits))
+                with spool.db:
+                    result=_render(config,stage,spool,channels,mapping,metadata,reports,hosts,forbidden,artwork_config)
+                    publish_run(stage,root,memory_check=lambda:memory_guard(limits))
                 return result
             finally:
                 shutil.rmtree(stage,ignore_errors=True)
@@ -192,8 +196,43 @@ def _render(config,root,spool,channels,mapping,metadata,reports,hosts,forbidden,
         logo_records.append({'type':'channel_logo','provider':'source_declared','channel':qid,
                              'url':url,'verified':True,'evidence':logo['evidence'],
                              'attribution':logo.get('attribution'),**checked})
+    stable = artwork_config.get('stable_selection') is True
+    mapped = [entry for entry in mapping['entries'] if entry['status'] == 'confirmed']
+    device_by_source = {}
+    for entry in mapped:
+        device_by_source.setdefault(entry['qualified_id'], []).append('provider:'+entry['provider_id'])
+    provider_logos = {'verified_provider_logos':0,'xmltv_logos_exported':0,'full_provider_denominator_known':False}
+    local_logos = {}
+    if config.get('provider_logos'):
+        from .private_logos import verify_provider_logos
+        local = config['provider_logos']
+        provider_logos = verify_provider_logos(local['inventory_path'], local['files_root'], root, memory_check=guard)
+        if stable:
+            with (root/'provider-logo-metadata.jsonl').open() as logo_sidecar:
+                by_provider = {record['provider_channel_id']: record['asset']
+                               for line in logo_sidecar if (record := json.loads(line))}
+            for entry in mapped:
+                asset = by_provider.get(entry['provider_id'])
+                if asset:
+                    local_logos.setdefault(entry['qualified_id'], set()).add(asset)
+    selected_counts = Counter()
+    selections = None
+    if stable:
+        (root/PLACEHOLDER).parent.mkdir(parents=True, exist_ok=True)
+        atomic(root/PLACEHOLDER, standard_image())
+        selection_hosts = set(artwork_config.get('approved_image_hosts', hosts))
+        verifier = getattr(metadata, 'verify_selection_media', None) or getattr(metadata, 'verify_media', None)
+        selections = ArtworkSelections(spool.db, selection_hosts, forbidden, verifier,
+                                       artwork_config.get('manual_images', {}),
+                                       artwork_config.get('confirmed_invalid_images', {}),
+                                       artwork_config.get('manual_titles', {}))
+    selection_path = root/'artwork-selection.jsonl'
     provenance_temp=root/'.source-media.pending'; artwork_temp=root/'.artwork.pending'
-    with provenance_temp.open('w',encoding='utf-8') as provenance, artwork_temp.open('w',encoding='utf-8') as sidecar:
+    selection_output = selection_path.open('w', encoding='utf-8') if stable else nullcontext()
+    with (provenance_temp.open('w',encoding='utf-8') as provenance,
+          artwork_temp.open('w',encoding='utf-8') as sidecar,
+          selection_output as selected):
+
         for row in channels:
             qid=row['qualified_id']; urls={logo_by_id[qid]} if qid in logo_by_id else set()
             clean,excluded=clean_element(row['element'],urls,hosts,forbidden)
@@ -203,22 +242,79 @@ def _render(config,root,spool,channels,mapping,metadata,reports,hosts,forbidden,
                 omissions[item['reason']]+=1
                 provenance.write(json.dumps({'source':row['source'],'channel':qid,**item},ensure_ascii=False)+'\n')
         for record in logo_records: sidecar.write(json.dumps(record,ensure_ascii=False)+'\n')
-        with spool.db:
+        with (nullcontext() if stable else spool.db):
             spool.db.execute('DROP TABLE IF EXISTS rendered_events')
             spool.db.execute('CREATE TABLE rendered_events(source TEXT,channel TEXT,start REAL,stop REAL,fingerprint TEXT PRIMARY KEY,payload BLOB)')
+            if selections:
+                spool.db.execute('CREATE TEMP TABLE emitted_artwork_events (event_key TEXT PRIMARY KEY)')
+                selections.prune((reference-timedelta(days=7)).timestamp())
             for row in spool.iter_programmes():
                 if row['stop']<=lower or row['start']>=upper:
                     horizon_excluded[row['source']]+=1; continue
-                event,records=metadata.enrich(channel_map[row['qualified_id']],row['element'])
+                original = row['element']
+                lookup = original
+                kwargs = {}
+                if selections:
+                    key = event_key(row)
+                    previous = selections.previous(key)
+                    first_variant = spool.db.execute(
+                        'INSERT OR IGNORE INTO emitted_artwork_events VALUES (?)', (key,)).rowcount == 1
+                    title = selections.title_override(key)
+                    if title:
+                        lookup = copy.deepcopy(original)
+                        lookup.find('title').text = title
+                    if hasattr(metadata, 'enrich_with_selection'):
+                        kwargs['collect_images'] = first_variant and selections.needs_candidates(key, previous, title)
+                enrich = metadata.enrich_with_selection if kwargs else metadata.enrich
+                event,records=enrich(channel_map[row['qualified_id']],lookup,**kwargs)
+                if lookup is not original:
+                    for node in event.findall('title'):
+                        event.remove(node)
+                    for index, node in enumerate(original.findall('title')):
+                        event.insert(index, copy.deepcopy(node))
                 verified=[r for r in records if r.get('verified') and r.get('url')
                           and r.get('type') in {'poster','backdrop','episode_still'}]
                 urls={r['url'] for r in verified}
+                if selections:
+                    urls.update(record['url'] for record in records if record.get('provider') == 'feed'
+                                and validated_candidate(record, selection_hosts, forbidden))
                 event,excluded=clean_element(event,urls,hosts,forbidden)
                 # The enrichment adapter may never alter schedule identity.
-                for key in ('channel','start','stop'):
-                    if event.get(key)!=row['element'].get(key): raise ValueError('ARTWORK_CHANGED_PROGRAMME_IDENTITY')
+                for attribute in ('channel','start','stop'):
+                    if event.get(attribute)!=row['element'].get(attribute): raise ValueError('ARTWORK_CHANGED_PROGRAMME_IDENTITY')
                 if not (event.findtext('title') or '').strip(): raise ValueError('ARTWORK_REMOVED_PROGRAMME_TITLE')
-                if verified: matched+=1; verified_count+=len(verified)
+                if selections:
+                    logos = local_logos.get(row['qualified_id'], set())
+                    logo = next(iter(logos)) if len(logos) == 1 else None
+                    decisions = (selections.select(key, row['stop'], previous, records, logo, title)
+                                 if first_variant else previous)
+                    for icon in event.findall('icon'):
+                        event.remove(icon)
+                    urls = dict.fromkeys(item['selected_url'] for item in decisions.values()
+                                         if 'selected_url' in item)
+                    for url in urls:
+                        ET.SubElement(event, 'icon', {'src': url})
+                    if first_variant:
+                        selected_counts.update(item['selected_provider'] for item in decisions.values())
+                        selected.write(json.dumps({
+                            'schema_version': 1, 'event_key': key, 'channel': row['qualified_id'],
+                            'start_utc': datetime.fromtimestamp(row['start'], timezone.utc).isoformat(),
+                            'stop_utc': datetime.fromtimestamp(row['stop'], timezone.utc).isoformat(),
+                            'device_channels': sorted(device_by_source.get(row['qualified_id'], [])),
+                            'decisions': decisions, 'offline': local_choice(logo),
+                            'standard_image': PLACEHOLDER,
+                        }, ensure_ascii=False, sort_keys=True)+'\n')
+                        for role, choice in decisions.items():
+                            if 'selected_url' not in choice:
+                                continue
+                            receipt = dict(choice, type=choice['selected_role'],
+                                           provider=choice['selected_provider'], url=choice['selected_url'],
+                                           verified=True, source=row['source'], channel=row['qualified_id'],
+                                           start=event.get('start'), stop=event.get('stop'),
+                                           event_key=key, display_role=role)
+                            sidecar.write(json.dumps(receipt, ensure_ascii=False, sort_keys=True)+'\n')
+                    if urls: matched+=1; verified_count+=len(urls)
+                elif verified: matched+=1; verified_count+=len(verified)
                 for record in records:
                     if record.get('provider')=='feed' and not record.get('verified'):
                         omissions['UNVERIFIED_SOURCE_MEDIA']+=1
@@ -228,7 +324,7 @@ def _render(config,root,spool,channels,mapping,metadata,reports,hosts,forbidden,
                         if _url_safe(value,forbidden): item['public_reference']=value
                         provenance.write(json.dumps({'source':row['source'],'channel':row['qualified_id'],
                                                      'start':event.get('start'),**item},ensure_ascii=False)+'\n')
-                    elif record.get('provider') in {'tmdb','tvmaze'}:
+                    elif not stable and record.get('provider') in {'tmdb','tvmaze'}:
                         if not _url_safe(record.get('url',''),forbidden):
                             record={k:v for k,v in record.items() if k!='url'}
                             record.update(verified=False,error='UNSAFE_ARTWORK_REFERENCE')
@@ -243,10 +339,10 @@ def _render(config,root,spool,channels,mapping,metadata,reports,hosts,forbidden,
                 exported_by_source[row['source']]+=1
                 guard()
         provenance.flush(); os.fsync(provenance.fileno()); sidecar.flush(); os.fsync(sidecar.fileno())
-    summary=mapping['summary']; mapped=[e for e in mapping['entries'] if e['status']=='confirmed']
-    device_by_source={}
-    for entry in mapped:
-        device_by_source.setdefault(entry['qualified_id'],[]).append('provider:'+entry['provider_id'])
+        if selected is not None:
+            selected.flush()
+            os.fsync(selected.fileno())
+    summary=mapping['summary']
     populated={row[0] for row in spool.db.execute('SELECT DISTINCT channel FROM rendered_events')}
     mapped_with=sum(e['qualified_id'] in populated for e in mapped)
     summary.update(mapped_channels_with_programmes=mapped_with,
@@ -302,11 +398,6 @@ def _render(config,root,spool,channels,mapping,metadata,reports,hosts,forbidden,
         if source['valid_programmes']!=source['exported_programmes']+source['horizon_excluded_programmes']:
             raise ValueError('FULL_COVERAGE_ACCOUNTING_FAILED')
     counts=spool.counts()
-    provider_logos={'verified_provider_logos':0,'xmltv_logos_exported':0,'full_provider_denominator_known':False}
-    if config.get('provider_logos'):
-        from .private_logos import verify_provider_logos
-        local=config['provider_logos']
-        provider_logos=verify_provider_logos(local['inventory_path'],local['files_root'],root,memory_check=guard)
     bounds=spool.db.execute('SELECT MIN(start),MAX(stop) FROM rendered_events').fetchone()
     report={'status':status,'status_flags':flags or [status],'configured_sources':len(config['sources']),
             'real_sources_successful':sum(s['successful'] for s in reports),'source_coverage_complete':True,
@@ -335,6 +426,11 @@ def _render(config,root,spool,channels,mapping,metadata,reports,hosts,forbidden,
               'Conflicting/overlapping source alternatives retained, not silently discarded.',
               'Time envelopes do not establish complete schedules; missing programme counts are unknown.',
               'Original unverified media remains in private snapshots; Android rendering not verified.']}
+    if stable:
+        report['artwork']['selected_by_provider'] = {
+            provider: selected_counts[provider]
+            for provider in ('manual', 'tmdb', 'tvmaze', 'xmltv', 'logo', 'placeholder')
+        }
     guard()
     atomic(root/'quality-report.json',(json.dumps(report,sort_keys=True,indent=2)+'\n').encode())
     return report
