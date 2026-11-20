@@ -1,10 +1,10 @@
 name: XCMate private delivery – manual synthetic smoke
 
-# NO schedule, NO push/PR trigger, NO real XMLTV payload, NO checkout.
 on:
   workflow_dispatch:
 
-permissions: {}
+permissions:
+  contents: read
 
 concurrency:
   group: xcmate-private-delivery-smoke
@@ -12,105 +12,16 @@ concurrency:
 
 jobs:
   private-output-smoke:
-    name: Private GitHub token and synthetic file transfer
+    name: Private GitHub publisher and independent synthetic readback
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    env:
-      OUTPUT_WRITE_TOKEN: ${{ secrets.XCMATE_EPG_PRIVATE_WRITE_TOKEN }}
-      GITHUB_RUN_NUMBER: ${{ github.run_number }}
     steps:
-      - name: Validate private repository and upload/download synthetic fixture
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import base64
-          import json
-          import os
-          import sys
-          import urllib.error
-          import urllib.request
-
-          TOKEN = os.environ.get("OUTPUT_WRITE_TOKEN", "")
-          if not TOKEN:
-              sys.exit("FAIL: XCMATE_EPG_PRIVATE_WRITE_TOKEN is not configured")
-          REPO = "artattakk-creator/xcmate-epg-private"
-          PATH = "tests/agent-upload-smoke.txt"
-          API = "https://api.github.com/repos/" + REPO
-          EXPECTED_PREFIX = b"XCMATE_PRIVATE_UPLOAD_SMOKE_OK\n"
-          DATA = EXPECTED_PREFIX + ("Run: " + os.environ.get("GITHUB_RUN_NUMBER", "unknown") + "\n").encode()
-          HEADERS = {
-              "Authorization": "Bearer " + TOKEN,
-              "Accept": "application/vnd.github+json",
-              "X-GitHub-Api-Version": "2022-11-28",
-              "User-Agent": "xcmate-private-smoke/1.0"
-          }
-
-          def request(method, url, payload=None, authenticated=True):
-              headers = dict(HEADERS) if authenticated else {
-                  "Accept": "application/vnd.github+json",
-                  "X-GitHub-Api-Version": "2022-11-28",
-                  "User-Agent": "xcmate-private-smoke/1.0"
-              }
-              if payload is not None:
-                  headers["Content-Type"] = "application/json"
-              req = urllib.request.Request(
-                  url, method=method, headers=headers,
-                  data=json.dumps(payload).encode() if payload is not None else None
-              )
-              try:
-                  with urllib.request.urlopen(req, timeout=20) as resp:
-                      return resp.status, json.loads(resp.read().decode())
-              except urllib.error.HTTPError as exc:
-                  return exc.code, {}
-              except urllib.error.URLError:
-                  sys.exit("FAIL: GitHub HTTPS request failed")
-
-          status, metadata = request("GET", API)
-          if status != 200 or metadata.get("private") is not True:
-              sys.exit("FAIL: destination is not confirmed PRIVATE and accessible with token")
-          print("PASS: private destination verified")
-
-          url = API + "/contents/" + PATH
-          status, _ = request("GET", url, authenticated=False)
-          if status != 404:
-              sys.exit("FAIL: unauthenticated contents request did not return 404")
-          print("PASS: anonymous access denied (404)")
-
-          status, current = request("GET", url)
-          if status not in (200, 404):
-              sys.exit("FAIL: cannot inspect private smoke fixture (HTTP " + str(status) + ")")
-          payload = {
-              "message": "test(private): manual synthetic upload smoke",
-              "content": base64.b64encode(DATA).decode(),
-              "branch": "main"
-          }
-          if status == 200:
-              raw_content = current.get("content")
-              if not isinstance(raw_content, str):
-                  sys.exit("FAIL: unexpected existing smoke fixture encoding")
-              try:
-                  existing = base64.b64decode(raw_content)
-              except ValueError:
-                  sys.exit("FAIL: existing smoke fixture cannot be decoded")
-              if not existing.startswith(EXPECTED_PREFIX):
-                  sys.exit("FAIL: refusing to overwrite unrelated file")
-              payload["sha"] = current["sha"]
-
-          status, response = request("PUT", url, payload)
-          if status not in (200, 201):
-              sys.exit("FAIL: write denied or failed (HTTP " + str(status) + ")")
-          print("PASS: synthetic upload completed")
-
-          status, result = request("GET", url)
-          if status != 200:
-              sys.exit("FAIL: authenticated read-back failed (HTTP " + str(status) + ")")
-          try:
-              read_back = base64.b64decode(result["content"])
-          except (KeyError, ValueError):
-              sys.exit("FAIL: authenticated read-back is not valid base64")
-          if read_back != DATA:
-              sys.exit("FAIL: private read-back does not match uploaded content")
-          print("PASS: authenticated read-back matched")
-          print("SUCCESS: no real EPG data or secrets were published")
-          PY
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify REST privacy, publish and read back a synthetic fixture
+        env:
+          XCMATE_EPG_PRIVATE_WRITE_TOKEN: ${{ secrets.XCMATE_EPG_PRIVATE_WRITE_TOKEN }}
+          XCMATE_EPG_PRIVATE_READ_TOKEN: ${{ secrets.XCMATE_EPG_PRIVATE_READ_TOKEN }}
+        run: python3 -m xcmate_epg.github_smoke

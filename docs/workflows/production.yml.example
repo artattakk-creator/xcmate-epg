@@ -1,11 +1,11 @@
-# NOT under .github/workflows; deliberately not executable.
-# Before activation: rights, protected persistent state, TMDB attribution,
-# source/mapping review, cache size/retention and explicit release approval.
-name: XCMate EPG Agent - future trusted production
+# Staged outside .github/workflows until the protected runner and release gates pass.
+# The runner must already have a durable shared lock-capable volume and protected
+# input files. Approval must match the validated run's exact generation.
+name: XCMate EPG Agent - daily private delivery
 on:
   workflow_dispatch:
-  # schedule:
-  #   - cron: '17 3 * * *'
+  schedule:
+    - cron: '17 3 * * *'
 permissions:
   contents: read
 concurrency:
@@ -13,13 +13,75 @@ concurrency:
   cancel-in-progress: false
 jobs:
   aggregate:
-    if: false # separate production authorization required
+    if: github.ref == 'refs/heads/main' && vars.XCMATE_PRODUCTION_ENABLED == 'true'
+    environment: xcmate-production
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
+    env:
+      XCMATE_STATE_STORE: ${{ vars.XCMATE_STATE_STORE }}
+      XCMATE_PRIVATE_CONFIG: ${{ vars.XCMATE_PRIVATE_CONFIG }}
+      XCMATE_SOURCE_RIGHTS: ${{ vars.XCMATE_SOURCE_RIGHTS }}
+      XCMATE_DELIVERY_APPROVAL: ${{ vars.XCMATE_DELIVERY_APPROVAL }}
     steps:
-      - run: echo 'Protected persistent storage and private delivery approval required'
-# Future trusted runner: restore private snapshots and state before invoking
-# python -m xcmate_epg.daily with owner-only configuration, source rights and
-# a persistent state path. Require separate authorization before adding
-# --authorize-network, enabling this job or configuring the 24-hour trigger.
-# See docs/ISSUE498_PRIVATE_DAILY_DE.md. Keep private data outside public CI.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Verify the pinned local XMLTV grammar
+        run: |
+          python -m pip install lxml==6.1.1
+          dtd="$RUNNER_TEMP/xmltv.dtd"
+          curl --fail --silent --show-error --proto '=https' --max-time 20 \
+            https://raw.githubusercontent.com/XMLTV/xmltv/f33601698cf1f1c7a67030b9ec2d3ad565421b5a/xmltv.dtd \
+            -o "$dtd"
+          printf '%s  %s\n' a1c88c4b840a6a80f8c5b6e6b850a864a0340148a01e63d6f59326c846f1d5c2 "$dtd" | sha256sum --check
+          printf 'XCMATE_XMLTV_DTD=%s\n' "$dtd" >> "$GITHUB_ENV"
+      - name: Restore the last verified private state
+        run: |
+          umask 077
+          private_dir=$(mktemp -d "$RUNNER_TEMP/xcmate-private.XXXXXXXX")
+          python -m xcmate_epg.runner_state --store "$XCMATE_STATE_STORE" restore "$private_dir/state"
+          printf 'XCMATE_PRIVATE_STATE=%s/state\n' "$private_dir" >> "$GITHUB_ENV"
+      - name: Run the approved daily import
+        id: cycle
+        env:
+          TMDB_READ_ACCESS_TOKEN: ${{ secrets.TMDB_READ_ACCESS_TOKEN }}
+        run: |
+          cycle=$(python -m xcmate_epg.daily --config "$XCMATE_PRIVATE_CONFIG" \
+            --source-rights "$XCMATE_SOURCE_RIGHTS" --private-root "$XCMATE_PRIVATE_STATE" --authorize-network)
+          printf '%s\n' "$cycle"
+          printf '%s\n' "$cycle" | python -c 'import json,sys; sys.exit(json.load(sys.stdin)["cycle_status"] not in ("VALIDATED", "NOT_DUE"))'
+      - name: Verify GitHub delivery and rotate the owner-only Drive mirror
+        id: delivery
+        env:
+          XCMATE_EPG_PRIVATE_WRITE_TOKEN: ${{ secrets.XCMATE_EPG_PRIVATE_WRITE_TOKEN }}
+          XCMATE_EPG_PRIVATE_READ_TOKEN: ${{ secrets.XCMATE_EPG_PRIVATE_READ_TOKEN }}
+          XCMATE_DRIVE_CLIENT_ID: ${{ secrets.XCMATE_DRIVE_CLIENT_ID }}
+          XCMATE_DRIVE_CLIENT_SECRET: ${{ secrets.XCMATE_DRIVE_CLIENT_SECRET }}
+          XCMATE_DRIVE_REFRESH_TOKEN: ${{ secrets.XCMATE_DRIVE_REFRESH_TOKEN }}
+          XCMATE_DRIVE_MIRROR_FOLDER_ID: ${{ secrets.XCMATE_DRIVE_MIRROR_FOLDER_ID }}
+        run: |
+          for attempt in 1 2; do
+            if delivery=$(python -m xcmate_epg.github_delivery --private-root "$XCMATE_PRIVATE_STATE" \
+                --approval "$XCMATE_DELIVERY_APPROVAL"); then
+              printf '%s\n' "$delivery"
+              exit 0
+            fi
+            printf '%s\n' "$delivery"
+            if [[ "$attempt" == 2 ]] || ! printf '%s\n' "$delivery" | python -c \
+              'import json, re, sys; v=json.load(sys.stdin); sys.exit(not (v.get("drive_status") == "DRIVE_MIRROR_STALE" and re.fullmatch(r"DRIVE_(CONNECTION_FAILED|HTTP_(408|429|500|502|503|504))", v.get("drive_reason_code", ""))))'; then
+              exit 1
+            fi
+            sleep 5
+          done
+      - name: Save the verified state and the private delivery audit
+        if: always() && steps.cycle.outcome == 'success'
+        run: python -m xcmate_epg.runner_state --store "$XCMATE_STATE_STORE" save "$XCMATE_PRIVATE_STATE"
+      - name: Verify recovery and prune expired state snapshots
+        if: success() && steps.delivery.outcome == 'success'
+        run: |
+          python -m xcmate_epg.runner_state --store "$XCMATE_STATE_STORE" \
+            restore "$(dirname "$XCMATE_PRIVATE_STATE")/recovery"
+          python -m xcmate_epg.runner_state --store "$XCMATE_STATE_STORE" prune

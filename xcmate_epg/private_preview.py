@@ -22,7 +22,7 @@ from .xmltv import IMAGE_HOSTS, LIMIT, merge, parse, timestamp
 PREVIEW_STATUS = 'PRIVATE_LIVE_PREVIEW_DO_NOT_PUBLISH'
 
 
-def private_root(path):
+def private_location(path):
     path = Path(path).absolute()
     if any(part.is_symlink() for part in (path,*path.parents)):
         raise ValueError('UNSAFE_PRIVATE_ROOT')
@@ -38,6 +38,11 @@ def private_root(path):
             if result.returncode:
                 raise ValueError('UNSAFE_PRIVATE_ROOT')
             break
+    return path
+
+
+def private_root(path):
+    path = private_location(path)
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
     path.chmod(0o700)
     for directory,dirs,files in os.walk(path,followlinks=False):

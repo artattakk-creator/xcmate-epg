@@ -50,3 +50,25 @@ Der lokale Git-Test prüft den Transportvertrag. Für Produktivbetrieb sind die 
 - `XCMATE_XMLTV_DTD="$XCMATE_LOCAL_DTD" python -m unittest discover -s tests -v`
 - `python tools/smoke_xmltv.py --output "$XCMATE_SYNTHETIC_SMOKE"`
 - Synthetische Regressionen prüfen den gepinnten DTD-Lauf, 185.001 eindeutige Programme, standardisierte Mehrfachbilder samt Legacy-Icons und Senderlogos, die getrennten Rollen- und Zeitfensterzähler, private Overrides, Rechte vor I/O, drei Quellen, HTTP 304, Einzelfeed-Delta, HTTP 401/403/429, LastGood und Ableitung eines zusätzlichen Profils aus dem gespeicherten Universalstand.
+
+## Wiederanlauf und privater Transport
+
+Der Runner-Zustand benötigt ein separat bereitgestelltes, dauerhaftes, nur dem Betreiber zugängliches Dateisystem. Die Wiederherstellung erfolgt vor dem Tageslauf in ein neues Arbeitsverzeichnis. Der Speicher enthält SQLite, den Tageslauf-Termin, ausgewählte Quell-Snapshots mit Validatoren, das aktuelle verifizierte XMLTV-Bundle und vorhandene private Profile. Quellfreigaben, Secrets und die private Laufkonfiguration werden separat bereitgestellt.
+
+```sh
+python -m xcmate_epg.runner_state --store "$XCMATE_STATE_STORE" restore "$XCMATE_PRIVATE_STATE"
+python -m xcmate_epg.runner_state --store "$XCMATE_STATE_STORE" save "$XCMATE_PRIVATE_STATE"
+python -m xcmate_epg.runner_state --store "$XCMATE_STATE_STORE" restore "$XCMATE_RECOVERY_TEST" --previous
+```
+
+Vor einem Zeigerwechsel prüft das Modul Datei-SHA256, beide SQLite-Datenbanken und das unveränderliche Run-Bundle. Der Speicher hält den aktuellen und den vorherigen bestätigten Snapshot vor. Nach bestandenem Auslieferungs-Readback und Wiederanlauftest entfernt `runner_state --store "$XCMATE_STATE_STORE" prune` ausschließlich abgelaufene Snapshots außerhalb beider Zeiger. Für ältere verwaltete Snapshots gelten sieben Tage. Der erste bestätigte Snapshot kann durch diesen Aufruf nicht gelöscht werden.
+
+Der manuelle GitHub-Smoke verwendet die getrennten Secrets `XCMATE_EPG_PRIVATE_WRITE_TOKEN` und `XCMATE_EPG_PRIVATE_READ_TOKEN`. Er prüft die Privatheit, HTTP 404 ohne Authentifizierung und den exakten Readback einer synthetischen Testdatei am geschriebenen Commit. Ein erfolgreicher Smoke ersetzt den privaten Produktions-Readback nicht.
+
+`python -m xcmate_epg.github_delivery --private-root "$XCMATE_PRIVATE_STATE" --approval "$XCMATE_DELIVERY_APPROVAL"` verwendet die bestehende generationsgebundene lokale Freigabe und die gepinnte DTD. Das Tool legt die XMLTV-Datei als separaten, elternlosen Git-Commit ab und prüft ihre Bytes über die Contents-API mit dem READ-Secret. Erst daraufhin aktualisiert ein Fast-forward das Manifest auf dem privaten `main`. Die übrigen Repository-Dateien bleiben erhalten. Die Nutzdaten-Refs sind für kontrollierte Retention getrennt vom Manifestverlauf. Ihre automatische Rotation und der provisionierte persistente Runner-Speicher sind Voraussetzungen für einen unbeaufsichtigten Tagesbetrieb.
+
+### Rollierender Drive-Live-Spiegel
+
+Der Produktionsaufruf von `github_delivery` nimmt die aus GitHub bestätigte Produktionsgeneration auch in den privaten Drive-Spiegel auf. Ein gemeinsamer Lock auf dem dauerhaften Runner-Speicher serialisiert GitHub-Aktivierung und Drive-Rotation. Die Produktions-Workflow-Vorlage verwendet denselben Pfad. Die vorhandene Spiegeldatei bleibt bei Transportfehlern unter ihrem bisherigen Manifestzeiger abrufbar. Ein erfolgreicher Drive-Readback prüft die exakten Bytes, SHA256, GZIP und XMLTV. Nach bestätigtem neuem Zeiger verschiebt der Ablauf die alte verwaltete Kopie in den Drive-Papierkorb. Unveränderte SHA-Werte lösen keinen Upload aus. Verwaltete temporäre Uploads sind nach 48 Stunden für die Bereinigung berechtigt. Das private Audit `drive-mirror-audit.json` wird im Runner-Snapshot gesichert und enthält die Dateikennungen. Standardausgaben enthalten lediglich Status, SHA und gegebenenfalls einen bereinigten Fehlercode.
+
+Der Runner erhält die Ordnerbindung über `XCMATE_DRIVE_MIRROR_FOLDER_ID` und einen dedizierten OAuth-Zugang über `XCMATE_DRIVE_CLIENT_ID`, `XCMATE_DRIVE_CLIENT_SECRET` und `XCMATE_DRIVE_REFRESH_TOKEN` aus der geschützten Actions-Umgebung. Die Autorisierung verwendet den Scope `drive.file` und den explizit für die App zugänglich gemachten Zielordner im My Drive des Eigentümers. Der Code verlangt für alle beteiligten Drive-Objekte dieselben Owner-only-Berechtigungen. Kodi verwendet weiterhin den GitHub-Abruf. Die Workflow-Vorlage bleibt bis zur Provisionierung des geschützten Runners und zum realen Test der Auslieferung inaktiv.
