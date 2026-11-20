@@ -8,9 +8,10 @@ import unittest
 from unittest.mock import patch
 from urllib.request import Request
 
-from xcmate_epg import github_delivery, private_delivery
+from xcmate_epg import drive_mirror, github_delivery, private_delivery
 from xcmate_epg.full_export import read_run_manifest
 from xcmate_epg.full_preview import run_full
+from test_drive_mirror import FakeDrive
 from test_private_delivery import SOURCE, LOGO, VerifiedFixture
 
 
@@ -58,10 +59,10 @@ class GitHubDeliveryTests(unittest.TestCase):
             self.assertEqual(self.git(self.remote, 'rev-parse', 'main').decode().strip(), self.git_seed)
         return io.BytesIO(self.git(self.remote, 'show', f'{commit}:{path}'))
 
-    def publish(self, approval):
+    def publish(self, approval, **options):
         if not os.environ.get('XCMATE_XMLTV_DTD'):
             self.skipTest('Pinned offline XMLTV DTD required')
-        return github_delivery.publish(self.root, approval, _remote=str(self.remote), _read=self.readback)
+        return github_delivery.publish(self.root, approval, _remote=str(self.remote), _read=self.readback, **options)
 
     def test_readback_happens_before_manifest_and_keeps_other_files(self):
         manifest = self.publish(self.approval)
@@ -114,3 +115,34 @@ class GitHubDeliveryTests(unittest.TestCase):
         self.assertIsNone(redirected.get_header('Authorization'))
         with self.assertRaisesRegex(ValueError, 'PRIVATE_GITHUB_UNTRUSTED_REDIRECT'):
             handler.redirect_request(initial, None, 302, '', {}, 'https://example.invalid/fixture')
+
+    def test_mirror_retries_same_read_back_github_bytes_after_stale_failure(self):
+        def stale(archive, manifest, generation):
+            raise ValueError('DRIVE_HTTP_403')
+
+        first = self.publish(self.approval, mirror=stale)
+        self.assertEqual((first['status'], first['drive_status']), ('PRIVATE_READY', 'DRIVE_MIRROR_STALE'))
+        read_back_commit = self.git(self.remote, 'rev-parse', 'main').decode().strip()
+        self.assertEqual(first['manifest_commit'], read_back_commit)
+        drive = FakeDrive()
+
+        def mirror(archive, manifest, generation):
+            payload = self.git(self.remote, 'show', manifest['payload_ref'] + ':xcmate-epg.xml.gz')
+            self.assertEqual(payload, archive.read_bytes())
+            self.assertEqual(generation, self.approval['generation'])
+            result = drive_mirror.sync(drive, drive.folder, archive, manifest, generation,
+                                       lock_store=self.base, now=drive.now)
+            self.assertEqual(drive.media[result['drive_file_id']], payload)
+            return result
+
+        retry = self.publish(self.approval, mirror=mirror)
+        self.assertFalse(retry['changed'])
+        self.assertEqual(retry['sha256'], retry['drive_sha256'])
+        self.assertEqual(retry['drive_status'], 'DRIVE_MIRROR_VERIFIED')
+        self.assertEqual(self.git(self.remote, 'rev-parse', 'main').decode().strip(), read_back_commit)
+
+    def test_unapproved_release_never_touches_the_mirror(self):
+        def mirror(*args):
+            self.fail('mirror ran before a verified GitHub release')
+
+        self.assertEqual(self.publish(None, mirror=mirror)['status'], 'PRIVATE_PENDING')

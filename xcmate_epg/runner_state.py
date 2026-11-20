@@ -180,6 +180,9 @@ def _stage_paths(root, run):
     # accumulating every historical run and every previously fetched body.
     for filename in STATE_FILES:
         yield root / filename
+    audit = root / 'drive-mirror-audit.json'
+    if audit.exists():
+        yield audit
     for path, _ in _files(root / run['directory']):
         yield path
     for profile in _profiles(root):

@@ -1,20 +1,25 @@
 """Stage an approved Schema-3 payload and verify it before advancing GitHub main."""
 import argparse
 import base64
+from contextlib import nullcontext
 import hashlib
 import hmac
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+from .export import atomic
 from .full_export import read_full_archive, read_private_json, read_run_manifest
 from .github_smoke import API, COMMIT, request
 from .private_delivery import MANIFEST, MAX_GZIP, REF, XMLTV, publish_delivery
+from .private_preview import private_location
+from .runner_state import _lock, _protected
 
 REMOTE = 'https://github.com/artattakk-creator/xcmate-epg-private.git'
 
@@ -178,15 +183,31 @@ def _publish(repo, read, manifest, archive):
     return dict(manifest, changed=True, manifest_commit=commit, staging_retained=staging_retained)
 
 
-def publish(workspace, approval, *, publisher='', reader='', _remote=None, _read=None):
+def _mirror_in_environment(archive, manifest, generation):
+    from .drive_api import from_environment
+    from .drive_mirror import ID, sync
+
+    folder = os.environ.get('XCMATE_DRIVE_MIRROR_FOLDER_ID', '')
+    if not ID.fullmatch(folder):
+        raise ValueError('DRIVE_MIRROR_FOLDER_BINDING_REQUIRED')
+    return sync(from_environment(), folder, archive, manifest, generation,
+                lock_store=os.environ['XCMATE_STATE_STORE'])
+
+
+def publish(workspace, approval, *, publisher='', reader='', mirror=None, _remote=None, _read=None):
     """Use the existing generation-scoped local rights, artwork and XMLTV gates."""
     root = Path(workspace).absolute()
     manifest = publish_delivery(root, approval=approval)
     if manifest['status'] != 'PRIVATE_READY':
         return manifest
     manifest.pop('changed', None)
+    lock = nullcontext()
     if _remote is None:
-        _check_access(publisher, reader)
+        store = os.environ.get('XCMATE_STATE_STORE')
+        if not store:
+            raise ValueError('PRODUCTION_STORE_BINDING_REQUIRED')
+        lock = _lock(_protected(private_location(store)), '.runner-publish.lock')
+        mirror = mirror or _mirror_in_environment
     run = read_run_manifest(root)
     if run['generation'] != approval['generation']:
         raise ValueError('PUBLISH_GENERATION_CHANGED')
@@ -197,9 +218,28 @@ def publish(workspace, approval, *, publisher='', reader='', _remote=None, _read
     def read(commit, name):
         return _read_remote(reader, commit, name)
 
-    with tempfile.TemporaryDirectory(prefix='.github-delivery-', dir=root) as temp:
-        repo = _Repository(Path(temp), _remote or REMOTE, publisher)
-        return _publish(repo, _read or read, manifest, archive)
+    with lock:
+        if _remote is None:
+            _check_access(publisher, reader)
+        with tempfile.TemporaryDirectory(prefix='.github-delivery-', dir=root) as temp:
+            repo = _Repository(Path(temp), _remote or REMOTE, publisher)
+            result = _publish(repo, _read or read, manifest, archive)
+        if mirror is None:
+            return result
+        try:
+            audit = mirror(archive, result, run['generation'])
+        except (KeyError, OSError, TypeError, ValueError) as error:
+            code = str(error)
+            audit = {'status': 'DRIVE_MIRROR_STALE', 'github_sha256': result['sha256'],
+                     'reason_code': code if re.fullmatch(r'DRIVE_[A-Z0-9_]{1,100}', code)
+                     else 'DRIVE_MIRROR_OPERATION_FAILED'}
+        atomic(root / 'drive-mirror-audit.json', json.dumps(audit, sort_keys=True).encode())
+        result['drive_status'] = audit['status']
+        if 'drive_sha256' in audit:
+            result['drive_sha256'] = audit['drive_sha256']
+        if 'reason_code' in audit:
+            result['drive_reason_code'] = audit['reason_code']
+        return result
 
 
 def main():
@@ -213,9 +253,10 @@ def main():
                          reader=os.environ.get('XCMATE_EPG_PRIVATE_READ_TOKEN', ''))
     except (KeyError, OSError, TypeError, ValueError):
         parser.exit(1, 'XCMATE_PRIVATE_GITHUB_DELIVERY_BLOCKED\n')
-    print(json.dumps({key: result[key] for key in ('status', 'sha256', 'manifest_commit', 'changed', 'staging_retained')
-                      if key in result}, sort_keys=True))
-    return int(result['status'] != 'PRIVATE_READY')
+    visible = ('status', 'sha256', 'manifest_commit', 'changed', 'staging_retained',
+               'drive_status', 'drive_sha256', 'drive_reason_code')
+    print(json.dumps({key: result[key] for key in visible if key in result}, sort_keys=True))
+    return int(result['status'] != 'PRIVATE_READY' or result.get('drive_status') != 'DRIVE_MIRROR_VERIFIED')
 
 
 if __name__ == '__main__':
