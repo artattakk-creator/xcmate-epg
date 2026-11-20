@@ -50,3 +50,19 @@ Der lokale Git-Test prüft den Transportvertrag. Für Produktivbetrieb sind die 
 - `XCMATE_XMLTV_DTD="$XCMATE_LOCAL_DTD" python -m unittest discover -s tests -v`
 - `python tools/smoke_xmltv.py --output "$XCMATE_SYNTHETIC_SMOKE"`
 - Synthetische Regressionen prüfen den gepinnten DTD-Lauf, 185.001 eindeutige Programme, standardisierte Mehrfachbilder samt Legacy-Icons und Senderlogos, die getrennten Rollen- und Zeitfensterzähler, private Overrides, Rechte vor I/O, drei Quellen, HTTP 304, Einzelfeed-Delta, HTTP 401/403/429, LastGood und Ableitung eines zusätzlichen Profils aus dem gespeicherten Universalstand.
+
+## Wiederanlauf und privater Transport
+
+Der Runner-Zustand benötigt ein separat bereitgestelltes, dauerhaftes, nur dem Betreiber zugängliches Dateisystem. Die Wiederherstellung erfolgt vor dem Tageslauf in ein neues Arbeitsverzeichnis. Der Speicher enthält SQLite, den Tageslauf-Termin, ausgewählte Quell-Snapshots mit Validatoren, das aktuelle verifizierte XMLTV-Bundle und vorhandene private Profile. Quellfreigaben, Secrets und die private Laufkonfiguration werden separat bereitgestellt.
+
+```sh
+python -m xcmate_epg.runner_state --store "$XCMATE_STATE_STORE" restore "$XCMATE_PRIVATE_STATE"
+python -m xcmate_epg.runner_state --store "$XCMATE_STATE_STORE" save "$XCMATE_PRIVATE_STATE"
+python -m xcmate_epg.runner_state --store "$XCMATE_STATE_STORE" restore "$XCMATE_RECOVERY_TEST" --previous
+```
+
+Vor einem Zeigerwechsel prüft das Modul Datei-SHA256, beide SQLite-Datenbanken und das unveränderliche Run-Bundle. Der Speicher hält den aktuellen und den vorherigen bestätigten Snapshot vor. Nach bestandenem Auslieferungs-Readback und Wiederanlauftest entfernt `runner_state --store "$XCMATE_STATE_STORE" prune` ausschließlich abgelaufene Snapshots außerhalb beider Zeiger. Für ältere verwaltete Snapshots gelten sieben Tage. Der erste bestätigte Snapshot kann durch diesen Aufruf nicht gelöscht werden.
+
+Der manuelle GitHub-Smoke verwendet die getrennten Secrets `XCMATE_EPG_PRIVATE_WRITE_TOKEN` und `XCMATE_EPG_PRIVATE_READ_TOKEN`. Er prüft die Privatheit, HTTP 404 ohne Authentifizierung und den exakten Readback einer synthetischen Testdatei am geschriebenen Commit. Ein erfolgreicher Smoke ersetzt den privaten Produktions-Readback nicht.
+
+`python -m xcmate_epg.github_delivery --private-root "$XCMATE_PRIVATE_STATE" --approval "$XCMATE_DELIVERY_APPROVAL"` verwendet die bestehende generationsgebundene lokale Freigabe und die gepinnte DTD. Das Tool legt die XMLTV-Datei als separaten, elternlosen Git-Commit ab und prüft ihre Bytes über die Contents-API mit dem READ-Secret. Erst daraufhin aktualisiert ein Fast-forward das Manifest auf dem privaten `main`. Die übrigen Repository-Dateien bleiben erhalten. Die Nutzdaten-Refs sind für kontrollierte Retention getrennt vom Manifestverlauf. Ihre automatische Rotation und der provisionierte persistente Runner-Speicher sind Voraussetzungen für einen unbeaufsichtigten Tagesbetrieb.
