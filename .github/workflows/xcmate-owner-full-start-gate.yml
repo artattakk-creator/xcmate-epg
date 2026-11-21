@@ -1,0 +1,66 @@
+name: XCMate real full EPG – owner-only start gate
+on:
+  push:
+    branches:
+      - feat/guarded-full-live-one-shot-20261121
+    paths:
+      - .github/workflows/xcmate-owner-full-start-gate.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: xcmate-real-full-once-preflight
+  cancel-in-progress: false
+jobs:
+  protected-preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      TMDB_READ_ACCESS_TOKEN: ${{ secrets.TMDB_READ_ACCESS_TOKEN }}
+      XCMATE_EPG_PRIVATE_WRITE_TOKEN: ${{ secrets.XCMATE_EPG_PRIVATE_WRITE_TOKEN }}
+      XCMATE_PRIVATE_CONFIG_JSON: ${{ secrets.XCMATE_PRIVATE_CONFIG_JSON }}
+      XCMATE_SOURCE_RIGHTS_JSON: ${{ secrets.XCMATE_SOURCE_RIGHTS_JSON }}
+      XCMATE_PROVIDER_CATALOG_JSON: ${{ secrets.XCMATE_PROVIDER_CATALOG_JSON }}
+      XCMATE_PRIVATE_STATE_RESTORE_REF: ${{ secrets.XCMATE_PRIVATE_STATE_RESTORE_REF }}
+    steps:
+      - name: Gated startup / no unapproved third-party downloads
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+          from datetime import datetime, timezone
+
+          # Presence-only diagnostics: never print or save values.
+          names = (
+              'TMDB_READ_ACCESS_TOKEN',
+              'XCMATE_EPG_PRIVATE_WRITE_TOKEN',
+              'XCMATE_PRIVATE_CONFIG_JSON',
+              'XCMATE_SOURCE_RIGHTS_JSON',
+              'XCMATE_PROVIDER_CATALOG_JSON',
+              'XCMATE_PRIVATE_STATE_RESTORE_REF',
+          )
+          present = {name: bool(os.environ.get(name)) for name in names}
+          now = datetime.now(timezone.utc).isoformat(timespec='seconds')
+          print('REAL_FULL_START_ATTEMPT_UTC=' + now)
+          for name in names:
+              print(name + '=' + ('PRESENT' if present[name] else 'MISSING'))
+          print('GITHUB_RUN_ID=' + os.getenv('GITHUB_RUN_ID', 'unknown'))
+          if not all(present.values()):
+              print('REAL_FULL_START_RESULT=BLOCKED_PRECONDITIONS')
+              print('THREE_REAL_FEEDS=NOT_STARTED')
+              print('ARTWORK_MATCH=NOT_STARTED')
+              print('PRIVATE_READY=UNCHANGED')
+              print('No private feed fetched or published; no secrets or source URLs logged.')
+              sys.exit(1)
+          # A secret reference is NOT a restored workspace, and a nonempty
+          # rights string is NOT evidence. This runner has no verified
+          # checkpoint restore, current provider mapping or rights audit.
+          print('REAL_FULL_START_RESULT=BLOCKED_RESTORE_AND_RIGHTS_VALIDATION')
+          print('THREE_REAL_FEEDS=NOT_STARTED')
+          print('ARTWORK_MATCH=NOT_STARTED')
+          print('PRIVATE_READY=UNCHANGED')
+          print('Requires verified, protected restore and source-specific rights before full network import.')
+          sys.exit(1)
+          PY
