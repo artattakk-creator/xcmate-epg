@@ -7,13 +7,16 @@ import unittest
 from xcmate_epg.full_preview import run_full
 
 
+FIXTURE_REFERENCE = '2026-11-17T08:00:00+00:00'
+
 XML=b'<tv><channel id="one"><display-name>Fixture</display-name></channel><programme channel="one" start="20261117100000 +0100" stop="20261117110000 +0100"><title>Fixture</title><desc>Keep all metadata</desc><category>News</category></programme></tv>'
 
 
 class FullPreviewTests(unittest.TestCase):
     def make(self,d):
         p=Path(d); source=p/'source.xml'; source.write_bytes(XML)
-        config={'sources':[{'id':'s1','path':str(source)}],'minimum_sources':1}
+        config={'sources':[{'id':'s1','path':str(source)}],'minimum_sources':1,
+                'horizon': {'reference_time': FIXTURE_REFERENCE}}
         return p,source,config
 
     def test_full_input_and_empty_device_are_not_falsely_full_success(self):
@@ -132,6 +135,7 @@ class ReviewRegressions(unittest.TestCase):
             root=Path(d); source=root/'source.xml'
             source.write_bytes(XML.replace(b'</channel>',b'<icon src="https://image.tmdb.org/t/p/w500/logo.png"/></channel>',1).replace(b'</tv>',b'<channel id="empty"><display-name>Empty</display-name></channel></tv>'))
             config={'sources':[{'id':'s1','path':str(source)}],
+                'horizon': {'reference_time': FIXTURE_REFERENCE},
                 'mapping':{'catalog':[{'provider_id':'locked','name':'Empty'}],'catalog_complete':True,
                 'confirmations':[{'provider_id':'locked','qualified_id':'s1:empty','evidence':'manual'}]},
                 'artwork':{'confirmed_source_logos':[{'qualified_id':'s1:one','url':'https://image.tmdb.org/t/p/w500/logo.png','evidence':'manual','rights_reviewed':True}]}}
@@ -188,7 +192,8 @@ class ReviewRegressions(unittest.TestCase):
             from xcmate_epg.full_preview import run_full
             from xcmate_epg.streaming import SourceError
             root=Path(sys.argv[1]); source=root/'source.xml'
-            config={'sources':[{'id':'s1','path':str(source)}], 'limits':{'max_memory_bytes':40*1024*1024}}
+            config={'sources':[{'id':'s1','path':str(source)}], 'limits':{'max_memory_bytes':40*1024*1024},
+                    'horizon':{'reference_time':'2026-11-17T08:00:00+00:00'}}
             try:
                 r=run_full(config,root/'private')
                 blocked=r['status']=='SOURCE_BLOCKED'
